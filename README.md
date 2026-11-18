@@ -70,9 +70,9 @@ tandem sits under every TCP connection the laptop makes, so the rule is: when an
 |---|---|---|
 | Daemon crashes or is SIGKILLed | The nft table is created with the kernel's `owner` flag over the daemon's own netlink socket. The kernel deletes it when the process dies, however it dies. No cleanup code involved. | table gone in 7-29 ms; next request direct |
 | Daemon hangs | `WatchdogSec=3`; the daemon pings systemd only while its accept loop answers a real connection. systemd kills it, the kernel drops the table. | table gone 1.95 s after SIGSTOP (10.08 s with the earlier 10 s setting). New connections made while it hangs wait that long. |
-| archserver asleep (packets silently dropped) | Relay dial budget 300 ms, then direct; health marks the relay down and the redirect is paused. | first new connection direct in 400 ms; redirect paused 424 ms later |
+| archserver asleep (packets silently dropped) | Relay dial budget 300 ms, then direct. The first real connection that fails marks the relay down at once, so later connections skip the relay without waiting for the redirect to pause. | exactly one connection pays +300 ms (0.40 s vs 0.11 s baseline, container against the real relay); the next ones are at baseline |
 | Relay process dead (RST) | Same, faster. | new connection direct in ~100 ms |
-| Real relay service stopped (container client against archserver) | | first request 0.11 s, redirect paused after 3.9 s, restored 2 s after the relay returned |
+| Real relay service stopped (container client against archserver) | Refused dial, then direct. | no added latency: 0.10-0.11 s per request, same as baseline. The redirect itself pauses up to ~4 s later; nobody waits for that. |
 | Another VPN owns the default route (OpenVPN, WireGuard, a Tailscale exit node, PPP, policy IPsec) | Every 2 s: `ip route get 1.1.1.1`; if it leaves through anything but a plain Ethernet/Wi-Fi device, or xfrm policies exist, the redirect is paused. | paused within 2 s |
 | `tandem disable` | Flag file in `/var/lib/tandem`; survives reboots and restarts. | immediate |
 

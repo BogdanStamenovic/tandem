@@ -21,6 +21,9 @@ ct() { sudo systemd-run -M $M --wait --pipe -q "$@"; }
 case "${1:-}" in
 up)
   sudo mkdir -p "$LAB/usr"
+  # --volatile=yes takes /usr from the directory tree: give it the host's,
+  # read-only; --overlay below makes it writable inside the container only.
+  mountpoint -q "$LAB/usr" || { sudo mount --bind /usr "$LAB/usr" && sudo mount -o remount,bind,ro "$LAB/usr"; }
   cat /proc/sys/net/ipv4/ip_forward > /tmp/tandem-lab.ip_forward
   tmux new-session -d -s tandem-ct -x 200 -y 50 \
     "sudo systemd-nspawn -D $LAB --volatile=yes --overlay=/usr::/usr --bind-ro=/etc/ssl --bind-ro=/etc/ca-certificates -b -M $M --network-veth systemd.firstboot=off"

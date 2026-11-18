@@ -55,7 +55,8 @@ Fail-open under systemd:
 |---|---|
 | SIGKILL | Table gone in 29 ms, auto-restart, redirect back in 3.3 s. |
 | SIGSTOP | Watchdog killed it at 10 s, so WatchdogSec was cut to 3 s. Re-measured with 3 s (systemd-run in a netns): table gone after 1.95 s, Result=watchdog. |
-| Real relay stopped | Requests fine; paused in 3.9 s; restored 2 s after it came back. |
+| Real relay stopped | No added latency (0.10-0.11 s per request = baseline). The redirect pauses up to ~4 s later, which nothing waits for. |
+| Real relay asleep (silent drop) | After the change in baf45b1: exactly one request pays +300 ms (0.40 s), the rest at baseline. Before it, 2 of 4 did. |
 
 **archserver's own direct numbers** (the ceiling the relay can offer the laptop, `test/bench.sh`), Mbit/s:
 
