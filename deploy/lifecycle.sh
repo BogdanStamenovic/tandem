@@ -12,6 +12,11 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 
 build() {
   command -v go >/dev/null || { echo "tandem: Go is required to build (pacman -S go)" >&2; exit 1; }
+  # Lifecycle commands may run with a bare environment (no HOME, e.g. from a
+  # systemd unit); Go then has nowhere to put its build cache.
+  if [ -z "${GOCACHE:-}" ] && [ -z "${HOME:-}" ] && [ -z "${XDG_CACHE_HOME:-}" ]; then
+    export GOCACHE="$here/.gocache"
+  fi
   echo "building tandem ($(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo unknown))"
   # Vendored dependencies: no network needed, and the patched nftables copy is used.
   (cd "$here" && CGO_ENABLED=0 go build -mod=vendor -trimpath \
