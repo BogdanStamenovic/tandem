@@ -7,8 +7,8 @@ What tandem is, how it works and its limitations are in README.md. This file cov
 | Piece | State |
 |---|---|
 | Repo | https://github.com/BogdanStamenovic/tandem (public), `main` |
-| archserver relay | Installed via `ownbox install tandem` (interactive), updated via `ownbox update` to d1f0535 (later commits change only docs, so it was not restarted for them). `tandem-relay.service` is enabled at boot. It listens on `192.168.1.139:7411` only and allows `192.168.1.0/24`. The key was rotated after the lab tests (the lab key passed through a tmux pane). |
-| Laptop (`ssh arch`, hostname `bogdan`) | Installed 2026-11-18 ~10:28 UTC (his go-ahead at 10:27 UTC) with a fresh interactive `ownbox install tandem`. `tandem-client.service` is enabled and active. The nft ruleset before the install is saved on archserver at `~/tandem-laptop-ruleset-before.nft`. Note: ownbox lives in `~/.local/bin`, which is not on the PATH of a non-interactive `ssh arch` shell, so prefix `PATH=$HOME/.local/bin:$PATH`. |
+| archserver relay | `ownbox update` to f03e162 (2026-11-18 ~17:58 UTC; later commits are test tools and docs). The migration moved `listen` from `192.168.1.139:7411` to `0.0.0.0:7411`, and the original is kept as `/etc/tandem/tandem.json.pre-discovery`. Key hash unchanged (788bceb7...). A second update left the config byte-identical. It beacons from 192.168.1.139/24 every 5 s. Captured on enp4s0 and verified with the real key (`discotool verify`), and it answered a signed query (`discotool query`). Allows `192.168.1.0/24`. `tandem-relay.service` is enabled at boot. |
+| Laptop (`ssh arch`, hostname `bogdan`) | **Still on d92c6d1 (pre-discovery); the discovery update is pending.** At 15:5x UTC it was on a foreign network (192.168.4.108/22, gateway 192.168.4.1), and the old client was probing 192.168.1.139 through that gateway. It went offline around 17:20 UTC before the update. An attempt to add a count-only nft table `ip tandem_audit` (output hook, policy accept, counters only) timed out as the link died. It may or may not exist: check with `sudo nft list tables` and delete it with `sudo nft delete table ip tandem_audit`. A wake task `tandem-laptop-back` (every 15 min, `~/.local/state/tandem-laptop-watch.sh`) messages tandem-3f once ssh works again. Cancel it with `wake cancel tandem-laptop-back` after the update. Install details: installed 2026-11-18 ~10:28 UTC with an interactive `ownbox install tandem`; the nft ruleset before install is at `~/tandem-laptop-ruleset-before.nft` on archserver. ownbox is in `~/.local/bin`, which is not on a non-interactive ssh PATH. |
 | Lab | Torn down. `ip_forward` back to 0, no lab nft table, no container, no mounts. `test/container-lab.sh up/down` recreates it. The small-hardware lab (`test/smallhw.sh`) is torn down too: no netns, no VM unit, no cgroups, `kvm.halt_poll_ns` back to 200000, cpu5 frequency limits back to 1750500-4470508 kHz. |
 | Relay fd-limit fix | In the repo (README "Small hardware"), not deployed to archserver: under systemd the unit's open-file limit is already ample, so it changes only the startup log line there. The next `ownbox update tandem` picks it up. |
 
@@ -80,6 +80,30 @@ Fail-open under systemd:
 | `ownbox update tandem --yes` (10:39 UTC, d1f0535 to d92c6d1) | Key and config hashes identical, learned stats kept (relay 143 Mbit/s n=28, direct 101 n=27 before and after), service restarted on the new binary, still enabled, laptop online. |
 | `test/bench.sh 3` | README, "Measured on the real laptop". Hetzner fsn1 +63 %, OVH -23 %, mirror +20 %, pacman +12 % (medians). |
 
+## Discovery (2026-11-18 evening)
+
+Asked: "yeah lets do something along the lines of discovery" (the relay IP is DHCP; a change silently disabled tandem, and on foreign networks the client probed .139). README "How it works / Discovery" and "Limitations" cover the design. Tests:
+
+| Where | Result |
+|---|---|
+| `sudo test/netns.sh` | 47/47 on the last two runs |
+| `test/migrate-ct.sh a0062b9 HEAD` (after `test/container-lab.sh up`) | 22/22 |
+| archserver, live | beacons verified on the wire; query answered |
+
+The laptop update has not been done; see State.
+
+Notes for whoever continues:
+- **The suite's flakiness is old.** The pre-discovery revision fails the post-speed-test checks in about 2 of 3 runs, because the saturated 1 %-loss link makes the fail-open probes pause the redirect for ~2 s. Measured 2-3 such flaps per run. The suite now waits for the rules before those checks.
+- **bash reads a running script as it goes.** Editing `netns.sh` while it runs mixes old and new steps. Run a copy (`BIN=... bash copy.sh`) if you need to keep editing.
+- **`machinectl copy-to` will not overwrite.** `migrate-ct.sh` deletes the old bundle first; without that it silently tested a stale commit.
+- **tcpdump is not installed.** Captures use nft counters (netns) or an AF_PACKET socket bound to ETH_P_ALL. ETH_P_IP does not see outgoing frames.
+- **Laptop update plan:**
+  1. Count-only audit table for `ip daddr 192.168.1.139` and TCP/UDP 7411.
+  2. 60 s of counts on the old client (expect a leak if it is away from home).
+  3. `PATH=$HOME/.local/bin:$PATH ownbox update tandem --yes`.
+  4. Reset the counters; 60 s should show 0 away from home. At home, `tandem status` should show the relay from beacon or query, and a relayed download should work.
+  5. Delete the audit table.
+
 ## Small hardware (2026-11-18 afternoon)
 
 Asked: could the relay run with the compute of a Luckfox Pico Max (he first said Mini, corrected to Max)? The full write-up is in README "Small hardware". In short:
@@ -100,6 +124,7 @@ Method notes for whoever reruns it:
 
 - **Longer real-world numbers.** Three rounds on Wi-Fi only show differences over ~20 %. A run at a worse time of day (the prototype's 39 Mbit/s case) would say more.
 - **A real ARM board.** All small-hardware numbers are emulated; a Pico Max (or an H618 board for the 1 GbE case) on the bench would replace them. Packaging for a busybox target (init script, cross-build-and-push in place of ownbox on the board) is described in README, not built.
+- **The laptop's discovery update** (see State) and a real-pair proof at home: status shows beacon/query, relayed download works.
 - **`ownbox uninstall` on the laptop.** Exercised in the container only; he keeps tandem installed, so it was deliberately not run there.
 
 Bugs found and fixed on the way, so nobody "simplifies" them back:
