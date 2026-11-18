@@ -66,7 +66,8 @@ func Run(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("relay: key: %w (run `tandem pair --generate`)", err)
 	}
-	r := &Relay{cfg: cfg, psk: psk, replay: wire.NewReplayCache(), sem: make(chan struct{}, maxConns), start: time.Now()}
+	limit := connLimit()
+	r := &Relay{cfg: cfg, psk: psk, replay: wire.NewReplayCache(), sem: make(chan struct{}, limit), start: time.Now()}
 	for _, a := range cfg.Allow {
 		r.allow = append(r.allow, netip.MustParsePrefix(a))
 	}
@@ -92,7 +93,7 @@ func Run(cfg *config.Config) error {
 	} else {
 		defer cln.Close()
 	}
-	log.Printf("relay: listening on %s, allowing %v", cfg.Listen, cfg.Allow)
+	log.Printf("relay: listening on %s, allowing %v, up to %d connections", cfg.Listen, cfg.Allow, limit)
 	_ = sysd.Notify("READY=1")
 
 	sig := make(chan os.Signal, 1)
@@ -121,6 +122,46 @@ func Run(cfg *config.Config) error {
 		}
 		go r.handle(c.(*net.TCPConn))
 	}
+}
+
+// Each relayed connection holds two sockets plus, while both directions are
+// splicing, two pipes (io.Copy's splice path): 6 descriptors at worst.
+const (
+	fdsPerConn = 6
+	fdReserve  = 64 // listener, control socket, journal, netlink, dials in progress
+)
+
+// connLimit makes room for maxConns in RLIMIT_NOFILE, or shrinks the cap to
+// fit the descriptors there are. Under systemd the unit's limit is ample, but
+// a small board's busybox init leaves the kernel default hard limit of 4096:
+// 1000 connections then failed in accept4 with EMFILE (measured in a 1-vCPU
+// VM, test/smallhw.sh). Past the cap, connections get StatusUnavailable and
+// the client sends them direct, which is far better than EMFILE mid-dial.
+func connLimit() int {
+	want := uint64(maxConns*fdsPerConn + fdReserve)
+	var lim unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &lim); err != nil {
+		return maxConns
+	}
+	if lim.Cur < want {
+		raised := unix.Rlimit{Cur: want, Max: max(lim.Max, want)}
+		if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &raised); err == nil {
+			lim = raised
+		} else if lim.Cur < lim.Max {
+			raised = unix.Rlimit{Cur: lim.Max, Max: lim.Max}
+			if unix.Setrlimit(unix.RLIMIT_NOFILE, &raised) == nil {
+				lim = raised
+			}
+		}
+	}
+	n := (int(min(lim.Cur, want)) - fdReserve) / fdsPerConn
+	if n < 1 {
+		n = 1
+	}
+	if n < maxConns {
+		log.Printf("relay: open-file limit %d allows only %d connections (raise LimitNOFILE / ulimit -n to %d for %d)", lim.Cur, n, want, maxConns)
+	}
+	return min(n, maxConns)
 }
 
 func (r *Relay) allowed(a netip.Addr) bool {
