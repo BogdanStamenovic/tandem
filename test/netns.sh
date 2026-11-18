@@ -136,6 +136,7 @@ t0=$(ms)
 s=$(inc curl -s -o /dev/null --max-time 10 -w '%{http_code}' http://203.0.113.10/)
 dt=$(( $(ms)-t0 ))
 [ "$s" = 200 ] && [ $dt -lt 1500 ] && ok "relay asleep: first connection went direct in $dt ms" || bad "relay asleep: http=$s after $dt ms"
+for i in 2 3 4; do t1=$(ms); inc curl -s -o /dev/null --max-time 10 http://203.0.113.10/; echo "   request $i while relay asleep: $(( $(ms)-t1 )) ms"; done
 t0=$(ms)
 if wait_rules 0 5; then ok "relay asleep: rules removed $(( $(ms)-t0 )) ms later"; else bad "rules stayed while relay asleep"; fi
 s=$(inc curl -s -o /dev/null --max-time 10 -w '%{http_code}' http://203.0.113.10/)
@@ -150,7 +151,8 @@ t0=$(ms)
 s=$(inc curl -s -o /dev/null --max-time 10 -w '%{http_code}' http://203.0.113.10/)
 dt=$(( $(ms)-t0 ))
 [ "$s" = 200 ] && ok "relay dead: connection went direct in $dt ms" || { bad "relay dead: http=$s after $dt ms"; tail -5 "$T/client.log"; }
-wait_rules 0 5 && ok "relay dead: rules removed" || bad "relay dead: rules stayed"
+wait_rules 0 5 && ok "relay dead: redirect paused $(( $(ms)-t0 )) ms after the relay died" || bad "relay dead: rules stayed"
+for i in 1 2 3; do t1=$(ms); inc curl -s -o /dev/null --max-time 10 http://203.0.113.10/; echo "   request $i after relay death: $(( $(ms)-t1 )) ms"; done
 start_relay; wait_rules 1 10
 
 # ---- another VPN takes the default route

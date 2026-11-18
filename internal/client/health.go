@@ -59,7 +59,15 @@ func (h *Health) Up() bool {
 }
 
 // ReportFailure is called when a real connection could not reach the relay.
+// Unlike a probe it marks the relay down at once: a LAN dial that times out
+// or is refused is strong evidence, and waiting for a second failure let
+// further connections pay the 300 ms dial timeout while the relay slept.
+// A false alarm only means a few seconds of direct routing until two probes
+// succeed again.
 func (h *Health) ReportFailure(err error) {
+	h.mu.Lock()
+	h.failStreak = downAfter - 1
+	h.mu.Unlock()
 	h.record(false, 0, err)
 	select {
 	case h.kick <- struct{}{}:
