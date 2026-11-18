@@ -21,7 +21,7 @@ For reference, archserver directly reached Cloudflare at ~400-500 and the mirror
 
 ## Measured on the real laptop
 
-`test/bench.sh 3` on the laptop with tandem installed, 2026-11-18 11:30-11:36 UTC. Wi-Fi was at -64 dBm, 720 Mbit/s PHY rate. Each round pins every new connection to direct and then to relay (`tandem force`), in alternating order. Mbit/s for one 100 MB (or ~50 MB mirror file) download per cell; pacman is the total bytes of `pacman -Sw linux go python` over wall time, with pacman's parallel downloads.
+`test/bench.sh 3` on the laptop with tandem installed, 2026-11-18 10:30-10:36 UTC. Wi-Fi was at -64 dBm, 720 Mbit/s PHY rate. Each round pins every new connection to direct and then to relay (`tandem force`), in alternating order. Mbit/s for one 100 MB (or ~50 MB mirror file) download per cell; pacman is the total bytes of `pacman -Sw linux go python` over wall time, with pacman's parallel downloads.
 
 | Target | Direct (3 rounds) | Relay (3 rounds) | Median direct to relay |
 |---|---|---|---|
@@ -38,6 +38,16 @@ What that says, honestly:
 - OVH was faster direct in 2 of 3 rounds. That is exactly the case the per-destination engine exists for. After the bench it had learned relay 164 against direct 167 for OVH's /24, a tie, so the default (relay) stays; the margin rule needs a 10 % difference to switch.
 - Two single cells are outliers (relay pacman 37, direct mirror 59). Three rounds on Wi-Fi are not enough to call differences under ~20 %.
 - What the engine had learned overall after the run: relay 104 Mbit/s (n=22), direct 85 Mbit/s (n=21).
+
+A second run, by a different agent (manager-17), right after the bench above: direct vs tandem vs the original prototype proxy (`research/prototype_connect_proxy.py` on archserver, used via `curl -x`), one single-stream curl per cell, Mbit/s, 3 rounds. The mirror target was `core/linux-firmware-nvidia-20261019-1-any.pkg.tar.zst` from the Fastly mirror.
+
+| Round | Hetzner fsn1: direct / tandem / prototype | Fastly mirror: direct / tandem / prototype |
+|---|---|---|
+| 1 | 53 / 130 / 123 | 195 / 219 / 237 |
+| 2 | 56 / 126 / 109 | 140 / 237 / 207 |
+| 3 | 60 / 128 / 172 | 189 / 244 / 211 |
+
+tandem landed where the prototype did, so the transparent redirect and the authenticated wire protocol cost nothing measurable here. Its Hetzner numbers in this run (126-130) are higher and steadier than in the bench (59-132); that spread is the Wi-Fi, not the relay.
 
 ## How it works
 
