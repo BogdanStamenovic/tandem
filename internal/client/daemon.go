@@ -63,6 +63,9 @@ type Daemon struct {
 	bytes    [2]atomic.Int64
 	fallback atomic.Int64
 	failed   atomic.Int64
+	// forced pins every eligible connection to one path (-1 = auto). For
+	// benchmarks; not persisted, so a restart always returns to auto.
+	forced atomic.Int32
 }
 
 // ConnRecord is one finished (or failed) connection, for status and why.
@@ -94,6 +97,7 @@ func Run(cfg *config.Config) error {
 		started:  time.Now(),
 		reconcil: make(chan struct{}, 1),
 	}
+	d.forced.Store(-1)
 	d.bypass = append(d.bypass, netpolicy.Bypass...)
 	for _, n := range cfg.BypassNets {
 		d.bypass = append(d.bypass, netip.MustParsePrefix(n))
@@ -322,6 +326,9 @@ func (d *Daemon) handle(c *net.TCPConn) {
 		choice = decide.Choice{Path: decide.Direct, Reason: "never relayed (private address or bypass port)"}
 	case !d.health.Up():
 		choice = decide.Choice{Path: decide.Direct, Reason: "relay down"}
+	case d.forced.Load() >= 0:
+		p := decide.Path(d.forced.Load())
+		choice = decide.Choice{Path: p, Reason: "forced " + p.String() + " (tandem force auto to undo)"}
 	default:
 		choice = d.eng.Choose(key)
 	}
@@ -362,7 +369,8 @@ func (d *Daemon) handle(c *net.TCPConn) {
 	if busy.Active > 0 {
 		rec.Rate = decide.FmtRate(float64(busy.Bytes) / busy.Active.Seconds())
 	}
-	// Fallbacks are not a fair sample of either path.
+	// Fallbacks are not a fair sample of either path; forced runs are, and
+	// a benchmark is exactly the data the engine wants.
 	if rec.Fallback == "" {
 		rec.Sampled = d.eng.Observe(decide.Sample{Key: key, Path: path, Bytes: busy.Bytes, Active: busy.Active})
 	}

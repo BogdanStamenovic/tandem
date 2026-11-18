@@ -24,6 +24,7 @@ type Status struct {
 	VPN        string            `json:"vpn,omitempty"`
 	RuleError  string            `json:"rule_error,omitempty"`
 	NetError   string            `json:"net_error,omitempty"`
+	Forced     string            `json:"forced,omitempty"`
 	Health     HealthStatus      `json:"relay_health"`
 	Conns      map[string]int64  `json:"connections"`
 	Bytes      map[string]int64  `json:"bytes"`
@@ -52,6 +53,7 @@ func (d *Daemon) status() Status {
 		Active: installed, Inactive: why, Disabled: d.disabled(),
 		Uplink: ns.Uplink, VPN: ns.VPN, RuleError: rerr, NetError: nerr,
 		Health: d.health.Status(),
+		Forced: forcedName(d.forced.Load()),
 		Conns: map[string]int64{
 			"relay_active": d.active[decide.Relay].Load(), "direct_active": d.active[decide.Direct].Load(),
 			"relay_total": d.total[decide.Relay].Load(), "direct_total": d.total[decide.Direct].Load(),
@@ -141,6 +143,18 @@ func (d *Daemon) handleControl(req control.Request, uid int) (any, error) {
 		up := d.net.Uplink
 		d.mu.Unlock()
 		return Change{DryRun: true, Rules: nftrules.Text(d.spec(up))}, nil
+	case "force":
+		switch req.IP { // reuses the IP field as the argument
+		case "relay":
+			d.forced.Store(int32(decide.Relay))
+		case "direct":
+			d.forced.Store(int32(decide.Direct))
+		case "auto":
+			d.forced.Store(-1)
+		default:
+			return nil, fmt.Errorf("force: relay, direct or auto")
+		}
+		return Change{Changed: true, Message: "new connections: " + req.IP}, nil
 	case "disable", "enable":
 		// Any local user may toggle tandem: disabling only makes traffic go
 		// direct, and this is a single-user laptop.
@@ -173,4 +187,11 @@ func (d *Daemon) handleControl(req control.Request, uid int) (any, error) {
 		return ch, nil
 	}
 	return nil, fmt.Errorf("unknown command %q", req.Cmd)
+}
+
+func forcedName(v int32) string {
+	if v < 0 {
+		return ""
+	}
+	return decide.Path(v).String()
 }

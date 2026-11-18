@@ -17,7 +17,9 @@ Prototype measurement on 2026-11-18 (laptop over Wi-Fi, a throwaway asyncio CONN
 
 For reference, archserver directly reached Cloudflare at ~400-500 and the mirror at 347, and the LAN path archserver to laptop at ~212-242. So the relay can help most where the laptop's direct path is worst (far, high-RTT servers), helps little on close CDNs, and can never beat the ~220 Mbit/s Wi-Fi leg. The Cloudflare 42 shows a relayed connection can also lose, which is why tandem measures per destination instead of relaying everything.
 
-Numbers from tandem itself on the real laptop: **not measured yet** (see [Status](#status)).
+`test/bench.sh` on archserver itself, 2026-11-18 ~03:00 UTC, as the ceiling the relay can offer (Mbit/s): Hetzner fsn1 187-212, OVH 361-374, Hetzner Ashburn 54-57, `extra.files.tar.gz` from the Fastly mirror 274-279, `pacman -Sw python go` 217-243.
+
+Numbers from tandem itself on the real laptop: **not measured yet** (see [Status](#status)). `test/bench.sh` runs the same set with tandem pinned to direct and to relay, alternating.
 
 ## How it works
 
@@ -127,6 +129,7 @@ sudo nft delete table ip tandem              # only if a table somehow remains
 tandem status               state, relay health, per-destination measurements, recent connections
 tandem why HOST [--port N]  which path HOST's connections take and why (resolves all addresses)
 tandem disable | enable     turn redirection off/on; --dry-run shows what would change
+tandem force relay|direct|auto  pin new connections to one path for benchmarking (not persisted)
 tandem rules                the nft rules the client installs
 sudo tandem pair --ssh HOST re-pair a client; on the relay: --show, --export, --generate
 ```

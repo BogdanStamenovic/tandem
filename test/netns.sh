@@ -110,6 +110,13 @@ cli status --json | grep -q '"relay_total":[1-9]' && ok "connections went throug
 # private destinations are never redirected
 inc nft list table ip tandem | grep -q 'ip daddr 192.168.0.0/16 return' && ok "LAN bypass rule present" || bad "LAN bypass missing"
 
+# ---- force pins the path
+cli force direct >/dev/null; inc curl -s -o /dev/null http://203.0.113.10/
+cli status --json | python3 -c 'import json,sys; r=json.load(sys.stdin)["recent"][-1]; sys.exit(0 if r["path"]=="direct" and "forced" in r["reason"] else 1)' && ok "force direct pins new connections" || bad "force direct"
+cli force relay >/dev/null; inc curl -s -o /dev/null http://203.0.113.10/
+cli status --json | python3 -c 'import json,sys; r=json.load(sys.stdin)["recent"][-1]; sys.exit(0 if r["path"]=="relay" else 1)' && ok "force relay pins new connections" || bad "force relay"
+cli force auto >/dev/null
+
 # ---- kill -9 the client: rules must vanish with it
 kill -9 "$(cat "$T/client.pid")"; t0=$(ms)
 for i in $(seq 20); do table_present || break; sleep 0.1; done

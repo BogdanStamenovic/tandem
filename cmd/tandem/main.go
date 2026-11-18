@@ -42,6 +42,7 @@ Usage:
   tandem disable [--dry-run]        turn redirection off (persists across reboots)
   tandem enable [--dry-run]         turn it back on
   tandem rules                      print the nft rules the client installs
+  tandem force relay|direct|auto    pin new connections to one path (benchmarks; resets on restart)
   tandem pair --ssh HOST            (client, root) fetch address and key from the relay
   tandem pair --key HEX             (client, root) store a key given by hand
   tandem pair --show | --export     (relay, root) print the key / address+key as JSON
@@ -71,6 +72,15 @@ func main() {
 		err = cmdToggle(cmd, args)
 	case "rules":
 		err = cmdRules(args)
+	case "force":
+		if len(args) != 1 {
+			err = usageErr{errors.New("usage: tandem force relay|direct|auto")}
+			break
+		}
+		var ch client.Change
+		if err = call(control.Request{Cmd: "force", IP: args[0]}, &ch); err == nil {
+			fmt.Println(ch.Message)
+		}
 	case "pair":
 		err = cmdPair(args)
 	case "setup", "upgrade", "teardown":
@@ -185,6 +195,9 @@ func cmdStatus(args []string) error {
 		state = "inactive (all traffic direct): " + s.Inactive
 	}
 	fmt.Printf("tandem client, up %s\n  %s\n", s.Uptime, state)
+	if s.Forced != "" {
+		fmt.Printf("  FORCED: every eligible connection goes %s (tandem force auto)\n", s.Forced)
+	}
 	h := "down"
 	if s.Health.Up {
 		h = "up, rtt " + s.Health.RTT

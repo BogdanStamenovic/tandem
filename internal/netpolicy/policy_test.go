@@ -11,7 +11,7 @@ func TestIsPublic(t *testing.T) {
 		"192.168.1.139": false, "10.0.0.1": false, "172.16.5.4": false,
 		"127.0.0.1": false, "100.72.2.62": false, // tailnet (CGNAT)
 		"169.254.1.1": false, "224.0.0.251": false, "255.255.255.255": false,
-		"2a01:4f8::1": false, // IPv6 is never relayed in v1
+		"2a01:4f8::1":    false, // IPv6 is never relayed in v1
 		"::ffff:1.1.1.1": true,
 	}
 	for s, want := range cases {
