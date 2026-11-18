@@ -138,6 +138,11 @@ func (b *beaconer) answerLoop(stop <-chan struct{}) {
 		if err != nil {
 			return
 		}
+		// Our own beacons come back to this socket (broadcast loops back to
+		// local listeners); only packets that look like queries count.
+		if n < 4 || string(buf[:4]) != "TDQ1" {
+			continue
+		}
 		sap := src.(*net.UDPAddr).AddrPort()
 		q, err := discovery.ParseQuery(buf[:n], b.key, time.Now(), b.replay)
 		if err != nil {
