@@ -69,7 +69,7 @@ tandem sits under every TCP connection the laptop makes, so the rule is: when an
 | Situation | Mechanism | Measured |
 |---|---|---|
 | Daemon crashes or is SIGKILLed | The nft table is created with the kernel's `owner` flag over the daemon's own netlink socket. The kernel deletes it when the process dies, however it dies. No cleanup code involved. | table gone in 7-29 ms; next request direct |
-| Daemon hangs | `WatchdogSec=3`; the daemon pings systemd only while its accept loop answers a real connection. systemd kills it, the kernel drops the table. | earlier build with 10 s watchdog: killed at 10.08 s. New connections made while it hangs wait up to the watchdog interval. |
+| Daemon hangs | `WatchdogSec=3`; the daemon pings systemd only while its accept loop answers a real connection. systemd kills it, the kernel drops the table. | table gone 1.95 s after SIGSTOP (10.08 s with the earlier 10 s setting). New connections made while it hangs wait that long. |
 | archserver asleep (packets silently dropped) | Relay dial budget 300 ms, then direct; health marks the relay down and the redirect is paused. | first new connection direct in 400 ms; redirect paused 424 ms later |
 | Relay process dead (RST) | Same, faster. | new connection direct in ~100 ms |
 | Real relay service stopped (container client against archserver) | | first request 0.11 s, redirect paused after 3.9 s, restored 2 s after the relay returned |
