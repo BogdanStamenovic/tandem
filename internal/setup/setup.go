@@ -147,7 +147,7 @@ func Install(o Options) error {
 		if err := askClient(a, o, cfg, &keyHex); err != nil {
 			return err
 		}
-		if keyHex != "" {
+		if keyHex != "" && cfg.Relay != "" {
 			k, _ := pair.Parse(keyHex)
 			start := time.Now()
 			pingErr = client.Ping(netip.MustParseAddrPort(cfg.Relay), k, 2*time.Second)
@@ -156,8 +156,11 @@ func Install(o Options) error {
 			} else {
 				a.Say("  relay %s did not answer an authenticated ping: %v", cfg.Relay, pingErr)
 			}
-		} else {
+		} else if keyHex == "" {
 			pingErr = errors.New("no key")
+		} else {
+			pingErr = errors.New("no static address to check; the client will look for beacons")
+			a.Say("  no static relay address: the client finds the relay by its LAN beacons")
 		}
 	}
 	if cfg.Role == config.RoleRelay {
@@ -198,6 +201,9 @@ func Install(o Options) error {
 			return err
 		}
 	}
+	if cfg.Role == config.RoleClient && pingErr == nil {
+		recordHome(p, cfg)
+	}
 	if err := p.do("write config "+cfgPath, func() error { return cfg.Save(cfgPath) }); err != nil {
 		return err
 	}
@@ -237,16 +243,16 @@ func askRelay(a *Asker, o Options, cfg *config.Config, keyHex *string) error {
 	if defListen == "" {
 		defListen = cfg.Listen
 	}
-	if defListen == "" && lanIP.IsValid() {
-		defListen = netip.AddrPortFrom(lanIP, config.DefaultRelayPort).String()
+	if defListen == "" {
+		defListen = netip.AddrPortFrom(netip.IPv4Unspecified(), config.DefaultRelayPort).String()
 	}
-	l, err := a.String("Listen address (use the LAN address, never 0.0.0.0)", defListen, func(v string) error {
-		ap, err := netip.ParseAddrPort(v)
-		if err != nil {
+	_ = lanIP
+	// 0.0.0.0 by default: the relay keeps working when DHCP hands archserver
+	// a new address, and clients find it by beacon. The allow list and the
+	// key are what keep anyone else out.
+	l, err := a.String("Listen address (0.0.0.0:PORT follows address changes; the allow list below still applies)", defListen, func(v string) error {
+		if _, err := netip.ParseAddrPort(v); err != nil {
 			return fmt.Errorf("need IP:port: %v", err)
-		}
-		if ap.Addr().IsUnspecified() {
-			return errors.New("refusing to listen on every interface")
 		}
 		return nil
 	})
@@ -339,7 +345,7 @@ func askClient(a *Asker, o Options, cfg *config.Config, keyHex *string) error {
 				a.Say("  pairing over ssh failed: %v", err)
 			} else {
 				*keyHex = ex.Key
-				if o.Relay == "" {
+				if ap, err := netip.ParseAddrPort(ex.Listen); o.Relay == "" && err == nil && !ap.Addr().IsUnspecified() {
 					defRelay = ex.Listen
 				}
 				a.Say("  got the key; relay listens on %s", ex.Listen)
@@ -362,7 +368,10 @@ func askClient(a *Asker, o Options, cfg *config.Config, keyHex *string) error {
 			a.Say("  no key: the client will be installed but not started. Pair later with: sudo tandem pair --ssh %s", relayHost())
 		}
 	}
-	r, err := a.String("Relay address (IP:port on the LAN)", defRelay, func(v string) error {
+	r, err := a.String("Static relay address, used on this network if beacons are not heard (IP:port on the LAN; - for none)", defRelay, func(v string) error {
+		if v == "-" {
+			return nil
+		}
 		ap, err := netip.ParseAddrPort(v)
 		if err != nil {
 			return fmt.Errorf("need IP:port: %v", err)
@@ -375,8 +384,8 @@ func askClient(a *Asker, o Options, cfg *config.Config, keyHex *string) error {
 	if err != nil {
 		return err
 	}
-	if r == "" {
-		return errors.New("no relay address: set TANDEM_RELAY or pair with TANDEM_PAIR_SSH")
+	if r == "-" {
+		r = ""
 	}
 	cfg.Relay = r
 	return nil
@@ -520,10 +529,14 @@ func summary(a *Asker, cfg *config.Config, enabled bool) {
 	a.Say("Done. Role: %s.", cfg.Role)
 	switch cfg.Role {
 	case config.RoleRelay:
-		a.Say("  Relay listens on %s for %s.", cfg.Listen, strings.Join(cfg.Allow, ", "))
+		a.Say("  Relay listens on %s for %s and beacons on UDP %d.", cfg.Listen, strings.Join(cfg.Allow, ", "), config.DefaultRelayPort)
 		a.Say("  Pair a client by running `ownbox install tandem` on it (or: sudo tandem pair --ssh <this host>).")
 	case config.RoleClient:
-		a.Say("  Relay: %s. Check with: tandem status / tandem why HOST", cfg.Relay)
+		if cfg.Relay != "" {
+			a.Say("  Relay: found by LAN beacons; static fallback %s on networks where it has answered. Check with: tandem status / tandem why HOST", cfg.Relay)
+		} else {
+			a.Say("  Relay: found by LAN beacons. Check with: tandem status / tandem why HOST")
+		}
 		a.Say("  Turn off at any time: tandem disable")
 		a.Say("  Remove every rule by hand: sudo systemctl stop tandem-client; sudo nft delete table ip tandem")
 	}
@@ -547,6 +560,9 @@ func Upgrade(o Options) error {
 		return errors.New("upgrade must run as root")
 	}
 	a.Say("tandem upgrade (%s): config, key and learned data in %s are kept", cfg.Role, cfg.StateDir)
+	if err := migrateDiscovery(p, cfg); err != nil {
+		return err
+	}
 	enabled, active := unitState(cfg.Role)
 	if err := installFiles(p, cfg.Role); err != nil {
 		return err
@@ -559,6 +575,70 @@ func Upgrade(o Options) error {
 		a.Say("  %s was not running; left stopped", unitName(cfg.Role))
 	}
 	return nil
+}
+
+// migrateDiscovery moves a pre-discovery install to discovery mode.
+//
+// Relay: a listen address bound to one IP becomes 0.0.0.0 on the same port,
+// so a DHCP change no longer silently breaks it. Client: the config is left
+// alone ("relay" becomes the static fallback, and discovery is on by
+// default), and if that address answers an authenticated ping now, this
+// network is recorded as a home where the fallback may be used.
+//
+// Both are safe under `ownbox rollback`: an older binary accepts
+// 0.0.0.0:PORT and a config with "relay", and ignores discovery.json. The
+// original config is kept as tandem.json.pre-discovery.
+func migrateDiscovery(p *plan, cfg *config.Config) error {
+	path := config.Path()
+	switch cfg.Role {
+	case config.RoleRelay:
+		ap, err := netip.ParseAddrPort(cfg.Listen)
+		if err != nil || ap.Addr().IsUnspecified() {
+			return nil
+		}
+		to := netip.AddrPortFrom(netip.IPv4Unspecified(), ap.Port()).String()
+		return p.do(fmt.Sprintf("listen on %s instead of %s (address changes no longer matter); original kept as %s.pre-discovery", to, cfg.Listen, path), func() error {
+			if _, err := os.Stat(path + ".pre-discovery"); os.IsNotExist(err) {
+				if b, err := os.ReadFile(path); err == nil {
+					if err := os.WriteFile(path+".pre-discovery", b, 0o644); err != nil {
+						return err
+					}
+				}
+			}
+			cfg.Listen = to
+			return cfg.Save(path)
+		})
+	case config.RoleClient:
+		if cfg.Relay == "" {
+			return nil
+		}
+		k, err := pair.Load(cfg.PSKFile)
+		if err != nil {
+			return nil
+		}
+		if err := client.Ping(netip.MustParseAddrPort(cfg.Relay), k, 2*time.Second); err != nil {
+			p.a.Say("  relay %s does not answer here (%v): this network is not recorded as home; beacons will find the relay", cfg.Relay, err)
+			return nil
+		}
+		recordHome(p, cfg)
+	}
+	return nil
+}
+
+func recordHome(p *plan, cfg *config.Config) {
+	ap, err := netip.ParseAddrPort(cfg.Relay)
+	if err != nil {
+		return
+	}
+	_ = p.do("record this network as home (relay "+cfg.Relay+" answered here)", func() error {
+		fp, err := client.RecordHome(cfg.StateDir, ap)
+		if err != nil {
+			p.a.Say("  could not record this network: %v (beacons still work)", err)
+			return nil
+		}
+		p.a.Say("  network: %s", fp)
+		return nil
+	})
 }
 
 // Teardown is `tandem teardown`, run by ownbox remove: stop and remove the

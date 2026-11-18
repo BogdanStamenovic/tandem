@@ -17,6 +17,7 @@ import (
 
 	"github.com/BogdanStamenovic/tandem/internal/config"
 	"github.com/BogdanStamenovic/tandem/internal/control"
+	"github.com/BogdanStamenovic/tandem/internal/discovery"
 	"github.com/BogdanStamenovic/tandem/internal/netpolicy"
 	"github.com/BogdanStamenovic/tandem/internal/pair"
 	"github.com/BogdanStamenovic/tandem/internal/pipe"
@@ -43,6 +44,7 @@ type Relay struct {
 	authFail, refused, dialF atomic.Int64
 	bytesUp, bytesDown       atomic.Int64
 	lastAuthLog              atomic.Int64
+	beacons                  *beaconer
 }
 
 // Status is what `tandem status` shows on the relay.
@@ -59,6 +61,11 @@ type Status struct {
 	DialFailures  int64    `json:"dial_failures"`
 	BytesToClient int64    `json:"bytes_to_client"`
 	BytesUpstream int64    `json:"bytes_upstream"`
+	// Discovery: the LAN addresses beacons go out from, and counters.
+	BeaconAddrs     []string `json:"beacon_addrs"`
+	BeaconsSent     int64    `json:"beacons_sent"`
+	QueriesAnswered int64    `json:"queries_answered"`
+	QueriesRejected int64    `json:"queries_rejected"`
 }
 
 func Run(cfg *config.Config) error {
@@ -71,6 +78,7 @@ func Run(cfg *config.Config) error {
 	for _, a := range cfg.Allow {
 		r.allow = append(r.allow, netip.MustParsePrefix(a))
 	}
+	r.beacons = newBeaconer(psk, netip.MustParseAddrPort(cfg.Listen).Port(), r.allow)
 	// IP_FREEBIND lets the relay start before the LAN address is configured
 	// (boot ordering) without listening on every interface.
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
@@ -93,7 +101,11 @@ func Run(cfg *config.Config) error {
 	} else {
 		defer cln.Close()
 	}
-	log.Printf("relay: listening on %s, allowing %v, up to %d connections", cfg.Listen, cfg.Allow, limit)
+	stopBeacons := make(chan struct{})
+	defer close(stopBeacons)
+	go r.beacons.beaconLoop(stopBeacons)
+	go r.beacons.answerLoop(stopBeacons)
+	log.Printf("relay: listening on %s, allowing %v, up to %d connections; beacons on UDP %d", cfg.Listen, cfg.Allow, limit, discovery.Port)
 	_ = sysd.Notify("READY=1")
 
 	sig := make(chan os.Signal, 1)
@@ -181,6 +193,8 @@ func (r *Relay) status() Status {
 		Active: r.active.Load(), Total: r.total.Load(), Pings: r.pings.Load(),
 		AuthFailures: r.authFail.Load(), Refused: r.refused.Load(), DialFailures: r.dialF.Load(),
 		BytesToClient: r.bytesDown.Load(), BytesUpstream: r.bytesUp.Load(),
+		BeaconAddrs: r.beacons.lastAddrs.Load().([]string), BeaconsSent: r.beacons.sent.Load(),
+		QueriesAnswered: r.beacons.answered.Load(), QueriesRejected: r.beacons.rejected.Load(),
 	}
 }
 

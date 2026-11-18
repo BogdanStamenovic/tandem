@@ -40,7 +40,7 @@ const (
 type Daemon struct {
 	cfg    *config.Config
 	psk    []byte
-	relay  netip.AddrPort
+	finder *Finder
 	eng    *decide.Engine
 	rules  *nftrules.Rules
 	health *Health
@@ -92,7 +92,6 @@ func Run(cfg *config.Config) error {
 	d := &Daemon{
 		cfg:      cfg,
 		psk:      psk,
-		relay:    netip.MustParseAddrPort(cfg.Relay),
 		eng:      decide.New(decide.Config{Default: def}),
 		started:  time.Now(),
 		reconcil: make(chan struct{}, 1),
@@ -102,7 +101,6 @@ func Run(cfg *config.Config) error {
 	for _, n := range cfg.BypassNets {
 		d.bypass = append(d.bypass, netip.MustParsePrefix(n))
 	}
-	d.bypass = append(d.bypass, netip.PrefixFrom(d.relay.Addr(), 32))
 	d.bypassPorts = append(append(d.bypassPorts, netpolicy.BypassPorts...), cfg.BypassPorts...)
 
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
@@ -122,15 +120,36 @@ func Run(cfg *config.Config) error {
 		ln.Close()
 		return fmt.Errorf("client: nftables: %w", err)
 	}
-	d.health = NewHealth(d.relay, psk, func(up bool) {
-		log.Printf("client: relay %s is now %s", d.relay, map[bool]string{true: "up", false: "down"}[up])
+	var static netip.AddrPort
+	if cfg.Relay != "" {
+		static = netip.MustParseAddrPort(cfg.Relay)
+	}
+	d.finder = NewFinder(psk, static, cfg.DiscoveryOn(), cfg.StateDir, func(a netip.AddrPort, src string) {
+		d.health.SetAddr(a)
 		d.kickReconcile()
 	})
+	first, _ := d.finder.Current()
+	d.health = NewHealth(first, psk, func(up bool) {
+		addr := d.health.Addr()
+		log.Printf("client: relay %s is now %s", addr, map[bool]string{true: "up", false: "down"}[up])
+		if up {
+			d.finder.Verified(addr)
+		} else {
+			d.finder.Failed()
+		}
+		d.kickReconcile()
+	})
+	d.health.OnProbeFail = d.finder.ProbeFailed
+	d.finder.Listen()
 
 	stop := make(chan struct{})
+	go d.finder.Run(stop)
 	go d.acceptLoop()
 	go d.health.Run(stop)
 	go d.reconcileLoop(stop)
+	if err := WatchNetlink(func() { d.health.Suspend(); d.kickReconcile() }, stop); err != nil {
+		log.Printf("client: no netlink events (%v); network changes are noticed by the 2 s poll", err)
+	}
 	go d.saveLoop(stop)
 	cln, err := control.Serve(cfg.RunDir, d.handleControl)
 	if err != nil {
@@ -140,7 +159,11 @@ func Run(cfg *config.Config) error {
 		go d.watchdog(wd, stop)
 	}
 	_ = sysd.Notify("READY=1")
-	log.Printf("client: listening on %s, relay %s", d.local, d.relay)
+	if cfg.DiscoveryOn() {
+		log.Printf("client: listening on %s; finding the relay by beacons on UDP %d (static fallback %q)", d.local, 7411, cfg.Relay)
+	} else {
+		log.Printf("client: listening on %s, relay %s (discovery off)", d.local, cfg.Relay)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
@@ -195,8 +218,11 @@ func (d *Daemon) want() (bool, string) {
 		return false, ns.VPN
 	case ns.Uplink == "":
 		return false, "no default route"
-	case !d.health.Up():
-		return false, "relay " + d.relay.String() + " unreachable"
+	}
+	if a := d.health.Addr(); !a.IsValid() {
+		return false, "no relay on this network (no signed beacon, not a known home network)"
+	} else if !d.health.Up() {
+		return false, "relay " + a.String() + " unreachable"
 	}
 	return true, ""
 }
@@ -216,6 +242,10 @@ func (d *Daemon) reconcileLoop(stop <-chan struct{}) {
 	defer t.Stop()
 	for {
 		ns, err := ProbeNet()
+		if err == nil {
+			d.finder.NetChanged(ns)
+			d.health.Resume()
+		}
 		d.mu.Lock()
 		d.net = ns
 		d.netErr = ""
@@ -378,8 +408,15 @@ func (d *Daemon) handle(c *net.TCPConn) {
 }
 
 func (d *Daemon) dialRelay(dst netip.AddrPort) (*net.TCPConn, error) {
+	addr := d.health.Addr()
+	if !addr.IsValid() {
+		return nil, errors.New("no relay address")
+	}
+	if d.health.Suspended() {
+		return nil, errors.New("network changing; relay not contacted until it is identified")
+	}
 	dl := net.Dialer{Timeout: relayDialTimeout, Control: pipe.MarkControl(netpolicy.OwnMark)}
-	nc, err := dl.Dial("tcp4", d.relay.String())
+	nc, err := dl.Dial("tcp4", addr.String())
 	if err != nil {
 		d.health.ReportFailure(err)
 		return nil, fmt.Errorf("relay unreachable: %v", err)

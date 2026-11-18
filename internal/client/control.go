@@ -26,6 +26,7 @@ type Status struct {
 	NetError   string            `json:"net_error,omitempty"`
 	Forced     string            `json:"forced,omitempty"`
 	Health     HealthStatus      `json:"relay_health"`
+	Discovery  DiscoveryStatus   `json:"discovery"`
 	Conns      map[string]int64  `json:"connections"`
 	Bytes      map[string]int64  `json:"bytes"`
 	GlobalRate map[string]string `json:"global_rate"`
@@ -48,7 +49,7 @@ func (d *Daemon) status() Status {
 		why = "rules not installed yet"
 	}
 	return Status{
-		Role: "client", Relay: d.relay.String(),
+		Role: "client", Relay: addrString(d.health.Addr()), Discovery: d.finder.Status(),
 		Uptime: time.Since(d.started).Round(time.Second).String(),
 		Active: installed, Inactive: why, Disabled: d.disabled(),
 		Uplink: ns.Uplink, VPN: ns.VPN, RuleError: rerr, NetError: nerr,
@@ -106,6 +107,13 @@ func (d *Daemon) why(ap netip.AddrPort) Why {
 	}
 	d.mu.Unlock()
 	return w
+}
+
+func addrString(a netip.AddrPort) string {
+	if !a.IsValid() {
+		return ""
+	}
+	return a.String()
 }
 
 func contains(ps []uint16, p uint16) bool {

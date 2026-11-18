@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -186,6 +187,8 @@ func cmdStatus(args []string) error {
 		fmt.Printf("  connections: %d active, %d total; %d pings\n", s.Active, s.Total, s.Pings)
 		fmt.Printf("  rejected: %d auth, %d refused destinations, %d upstream dial failures\n", s.AuthFailures, s.Refused, s.DialFailures)
 		fmt.Printf("  bytes: %s to clients, %s upstream\n", human(s.BytesToClient), human(s.BytesUpstream))
+		fmt.Printf("  discovery: beacons from %s (%d sent), %d queries answered, %d rejected\n",
+			strings.Join(s.BeaconAddrs, ", "), s.BeaconsSent, s.QueriesAnswered, s.QueriesRejected)
 		return nil
 	}
 	var s client.Status
@@ -202,11 +205,35 @@ func cmdStatus(args []string) error {
 	if s.Health.Up {
 		h = "up, rtt " + s.Health.RTT
 	}
-	fmt.Printf("  relay %s: %s (for %s)", s.Relay, h, s.Health.Since)
-	if s.Health.LastErr != "" {
-		fmt.Printf(", last error: %s", s.Health.LastErr)
+	ds := s.Discovery
+	if s.Relay == "" {
+		fmt.Printf("  relay: none on this network: %s\n", ds.Explanation)
+	} else {
+		fmt.Printf("  relay %s (from %s", s.Relay, ds.Source)
+		if ds.LastHeard != "" && (ds.Source == "beacon" || ds.Source == "query") {
+			fmt.Printf(", last beacon %s", ds.LastHeard)
+		}
+		fmt.Printf("): %s (for %s)", h, s.Health.Since)
+		if s.Health.LastErr != "" {
+			fmt.Printf(", last error: %s", s.Health.LastErr)
+		}
+		fmt.Println()
 	}
-	fmt.Println()
+	if ds.Enabled {
+		var rej []string
+		for k, v := range ds.Counters.Rejected {
+			rej = append(rej, fmt.Sprintf("%s %d", k, v))
+		}
+		sort.Strings(rej)
+		home := "unknown network"
+		if ds.KnownHome {
+			home = "known home network"
+		}
+		fmt.Printf("  discovery: %s; %d beacons, %d answers to %d queries; rejected: %s; static fallback %s\n",
+			home, ds.Counters.Beacons, ds.Counters.Answers, ds.Counters.Queries, orNone(strings.Join(rej, ", ")), orNone(ds.Static))
+	} else {
+		fmt.Println("  discovery: off (\"discovery\": false); the static address is used everywhere")
+	}
 	if s.RuleError != "" {
 		fmt.Printf("  rule error: %s\n", s.RuleError)
 	}
@@ -354,6 +381,13 @@ func cmdToggle(cmd string, args []string) error {
 	return nil
 }
 
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
 func cmdRules(args []string) error {
 	var ch client.Change
 	if err := call(control.Request{Cmd: "rules"}, &ch); err == nil {
@@ -412,7 +446,7 @@ func cmdPair(args []string) error {
 		if cfg.Role != config.RoleRelay {
 			return errors.New("--export only makes sense on the relay")
 		}
-		return json.NewEncoder(os.Stdout).Encode(pair.Export{Listen: cfg.Listen, Key: hexKey})
+		return json.NewEncoder(os.Stdout).Encode(pair.Export{Listen: relay.Advertised(cfg), Key: hexKey})
 	case *gen:
 		if cfg.Role != config.RoleRelay {
 			return errors.New("--generate is for the relay; clients pair with --ssh or --key")
@@ -437,7 +471,7 @@ func cmdPair(args []string) error {
 				return err
 			}
 			k = ex.Key
-			if ex.Listen != cfg.Relay {
+			if ap, err := netip.ParseAddrPort(ex.Listen); err == nil && !ap.Addr().IsUnspecified() && ex.Listen != cfg.Relay {
 				fmt.Printf("relay address %s -> %s\n", cfg.Relay, ex.Listen)
 				cfg.Relay = ex.Listen
 				if err := cfg.Save(config.Path()); err != nil {
@@ -449,10 +483,19 @@ func cmdPair(args []string) error {
 			return err
 		}
 		kb, _ := pair.Parse(k)
-		if err := client.Ping(netip.MustParseAddrPort(cfg.Relay), kb, 2*time.Second); err != nil {
+		if cfg.Relay == "" {
+			fmt.Println("stored; no static address, the client finds the relay by beacons")
+		} else if err := client.Ping(netip.MustParseAddrPort(cfg.Relay), kb, 2*time.Second); err != nil {
 			fmt.Printf("stored, but the relay did not answer: %v\n", err)
 		} else {
 			fmt.Println("paired; relay answered")
+			// It answered here, so this network is one where the static
+			// address may be used if beacons are not heard.
+			if fp, err := client.RecordHome(cfg.StateDir, netip.MustParseAddrPort(cfg.Relay)); err == nil {
+				fmt.Printf("recorded this network as home: %s\n", fp)
+			} else {
+				fmt.Printf("could not record this network: %v (beacons still work)\n", err)
+			}
 		}
 		return restart()
 	}

@@ -29,8 +29,12 @@ const (
 type Config struct {
 	Role Role `json:"role"`
 
-	// Client: where the relay listens, e.g. "192.168.1.139:7411".
+	// Client: a fallback relay address, e.g. "192.168.1.139:7411". With
+	// discovery on it is only tried on a network where the relay has already
+	// proven itself; with discovery off it is the only address, used anywhere.
 	Relay string `json:"relay,omitempty"`
+	// Client: find the relay by signed LAN beacons (default true).
+	Discovery *bool `json:"discovery,omitempty"`
 	// Client: local port the redirect points at (bound on 127.0.0.1).
 	LocalPort uint16 `json:"local_port,omitempty"`
 	// Client: path when nothing has been measured, "relay" or "direct".
@@ -40,7 +44,8 @@ type Config struct {
 	// Client: extra IPv4 prefixes that always go direct.
 	BypassNets []string `json:"bypass_nets,omitempty"`
 
-	// Relay: listen address. Should be the LAN address.
+	// Relay: listen address, normally 0.0.0.0:7411 so an address change
+	// does not matter; the allow list and the key keep strangers out.
 	Listen string `json:"listen,omitempty"`
 	// Relay: source prefixes allowed to connect (in addition to the PSK).
 	Allow []string `json:"allow,omitempty"`
@@ -95,8 +100,10 @@ func (c *Config) Fill(dir string) {
 func (c *Config) Validate() error {
 	switch c.Role {
 	case RoleClient:
-		if _, err := netip.ParseAddrPort(c.Relay); err != nil {
-			return fmt.Errorf("config: relay %q: need IP:port (%v)", c.Relay, err)
+		if c.Relay != "" || !c.DiscoveryOn() {
+			if _, err := netip.ParseAddrPort(c.Relay); err != nil {
+				return fmt.Errorf("config: relay %q: need IP:port (%v)", c.Relay, err)
+			}
 		}
 		if c.Default != "relay" && c.Default != "direct" {
 			return fmt.Errorf("config: default must be relay or direct, not %q", c.Default)
@@ -123,6 +130,9 @@ func (c *Config) Validate() error {
 	}
 	return nil
 }
+
+// DiscoveryOn reports whether the client finds its relay by beacons.
+func (c *Config) DiscoveryOn() bool { return c.Discovery == nil || *c.Discovery }
 
 // Save writes c to path (0644; the key lives in its own 0600 file).
 func (c *Config) Save(path string) error {

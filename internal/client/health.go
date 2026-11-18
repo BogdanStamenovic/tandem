@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BogdanStamenovic/tandem/internal/netpolicy"
@@ -33,10 +34,52 @@ type Health struct {
 	changed    time.Time
 	kick       chan struct{}
 	onChange   func(bool)
+	// OnProbeFail is called after each failed probe, before the relay is
+	// declared down: discovery queries at once in case the relay moved.
+	OnProbeFail func()
+	// suspended: the network just changed and is not identified yet; no
+	// packet goes to the relay address until it is.
+	suspended atomic.Bool
 }
+
+// Suspend stops probes and relay dials until Resume, without counting as a
+// failure (a DHCP renew must not flap the redirect).
+func (h *Health) Suspend()        { h.suspended.Store(true) }
+func (h *Health) Resume()         { h.suspended.Store(false) }
+func (h *Health) Suspended() bool { return h.suspended.Load() }
 
 func NewHealth(addr netip.AddrPort, psk []byte, onChange func(bool)) *Health {
 	return &Health{addr: addr, psk: psk, kick: make(chan struct{}, 1), changed: time.Now(), onChange: onChange}
+}
+
+// Addr is the relay address being probed; invalid when there is none.
+func (h *Health) Addr() netip.AddrPort {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.addr
+}
+
+// SetAddr points the probes at a new address (or at nothing). The relay
+// counts as down until it answers there; the onChange callback is not
+// called, since this is not the relay failing.
+func (h *Health) SetAddr(a netip.AddrPort) {
+	h.mu.Lock()
+	if a == h.addr {
+		h.mu.Unlock()
+		return
+	}
+	h.addr = a
+	h.up, h.okStreak, h.failStreak, h.rtt = false, 0, 0, 0
+	h.lastErr = ""
+	if !a.IsValid() {
+		h.lastErr = "no relay address"
+	}
+	h.changed = time.Now()
+	h.mu.Unlock()
+	select {
+	case h.kick <- struct{}{}:
+	default:
+	}
 }
 
 type HealthStatus struct {
@@ -69,6 +112,9 @@ func (h *Health) ReportFailure(err error) {
 	h.failStreak = downAfter - 1
 	h.mu.Unlock()
 	h.record(false, 0, err)
+	if h.OnProbeFail != nil {
+		h.OnProbeFail()
+	}
 	select {
 	case h.kick <- struct{}{}:
 	default:
@@ -76,7 +122,16 @@ func (h *Health) ReportFailure(err error) {
 }
 
 func (h *Health) record(ok bool, rtt time.Duration, err error) {
+	h.recordFor(netip.AddrPort{}, ok, rtt, err)
+}
+
+// recordFor ignores a result for an address that is no longer current.
+func (h *Health) recordFor(addr netip.AddrPort, ok bool, rtt time.Duration, err error) {
 	h.mu.Lock()
+	if addr.IsValid() && addr != h.addr {
+		h.mu.Unlock()
+		return
+	}
 	was := h.up
 	if ok {
 		h.okStreak++
@@ -107,13 +162,20 @@ func (h *Health) record(ok bool, rtt time.Duration, err error) {
 }
 
 func (h *Health) probe() {
+	addr := h.Addr()
+	if !addr.IsValid() || h.Suspended() {
+		return // nothing discovered, or the network is changing: send nothing
+	}
 	start := time.Now()
-	err := Ping(h.addr, h.psk, probeTimeout)
+	err := Ping(addr, h.psk, probeTimeout)
 	rtt := time.Since(start)
 	if err == nil && rtt > maxProbeRTT {
 		err = errSlow{rtt}
 	}
-	h.record(err == nil, rtt, err)
+	h.recordFor(addr, err == nil, rtt, err)
+	if err != nil && h.OnProbeFail != nil {
+		h.OnProbeFail()
+	}
 }
 
 type errSlow struct{ rtt time.Duration }

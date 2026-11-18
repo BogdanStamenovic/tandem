@@ -61,7 +61,8 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK: reading the interface list, to beacon from each LAN address.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 LimitNOFILE=16384
 MemoryMax=512M
 
