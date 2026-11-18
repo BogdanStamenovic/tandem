@@ -174,7 +174,7 @@ Any local user may run `disable`/`enable`: disabling only makes traffic go direc
 - a relay on a clean link;
 - an "internet" server 40 ms RTT away.
 
-It then runs the fail-open tests above (25 checks).
+It then runs the fail-open tests above (27 checks).
 
 Download of a 64 MiB file, Mbit/s, two runs each. The first tandem run may be an exploration that went direct.
 
@@ -187,6 +187,115 @@ Download of a 64 MiB file, Mbit/s, two runs each. The first tandem run may be an
 The relay leg shares the lossy "Wi-Fi" link, so it can lose too: the 33 is a run where it did. The cliff between 0.1 % and 0.5 % direct is netem's random loss against CUBIC at a 46 ms RTT.
 
 These only show the mechanism. The shaping is invented, and the real laptop numbers will be smaller in both columns.
+
+## Small hardware
+
+**Question:** could the relay run on a box the size of a Luckfox Pico Max (Rockchip RV1106G3: one Cortex-A7 at 1.2 GHz, 256 MB RAM, one 10/100 Ethernet port), and what does it cost to run? No board was available, so this is an emulation on archserver (Ryzen 5 5600). `sudo test/smallhw.sh` rebuilds all of it.
+
+**Answer:** yes. On the Pico Max the 100 Mbit port is the bottleneck, not the CPU. The same CPU behind 1 GbE tops out at about 330 Mbit/s. Saturating 1 GbE takes about 3x that CPU.
+
+### How it was emulated
+
+- **A whole VM, not a capped process.** On archserver, 90 % of the relay's CPU cost is kernel receive softirq, and only 10 % is the relay process. At 855 Mbit/s the core was 33 % busy and the process 3.7 %. A cgroup CPU quota on the process does not throttle softirq, so it would have capped a tenth of the cost.
+  - The relay therefore runs in a 1-vCPU, 256 MB KVM guest: the stock Arch kernel, a 4 MB Go `/init` (`test/vminit`), no busybox.
+  - Only the vCPU thread is capped. QEMU's vhost and main-loop threads stand in for the NIC's DMA and run uncapped on another core.
+  - The guest NIC has TSO/GSO off. The RV1106 MAC has no TSO, and veth/virtio would otherwise hand over 64 KiB packets and hide the per-packet cost.
+- **CPU budget.** cpu.max gives the vCPU 1 ms per period. The period was calibrated with CoreMark on the same core under the same cap:
+
+  | cpu.max | CoreMark/s | Stands for |
+  |---|---|---|
+  | none | 38,941 | one Zen 3 core at 4.44 GHz |
+  | 1 ms / 10 ms | 3,203 | optimistic A7 (2.7/MHz) |
+  | **1 ms / 13 ms** | **2,447** | **A7 at 1.2 GHz (2.04/MHz)** |
+  | 1 ms / 20 ms | 1,582 | pessimistic, memory-bound A7 |
+
+  - The A7 side is published, not measured here: CoreMark 1971 at 1 GHz on an Allwinner A20 and 1150 at 528 MHz on an i.MX6UL (pmeerw.net/armbench), i.e. 2.0-2.2/MHz.
+  - Memory copy is a worse ratio: memcpy is 24.4 GB/s on this core (tinymembench) against 0.85-1.0 GB/s published for H3 and Pi 2 boards, about 27x.
+  - The relay moves data with `splice`, and checksums are offloaded on the board, so per-packet integer work dominates. That is why CoreMark is the yardstick.
+- **Link.** tbf shapes the relay's single link to 100 Mbit or 1 Gbit each way. Relayed bytes cross that one port twice, as on a one-port board.
+
+### Results
+
+Download through the relay, Mbit/s:
+
+| Link | CPU budget | 1 connection | 8 connections | Bottleneck |
+|---|---|---|---|---|
+| 100 Mbit | A7 pessimistic / central / optimistic | 93 / 92 / 93 | 91 / 93 / 93 | link |
+| 1 GbE | A7 pessimistic | 236 | 218 | CPU |
+| 1 GbE | **A7 at 1.2 GHz** | **323-330** | **338** | **CPU** |
+| 1 GbE | A7 optimistic | 424 | 445 | CPU |
+| 1 GbE | 2x A7 | 550 | 668 | CPU |
+| 1 GbE | 3x A7 | 631 | 927 | link |
+| 1 GbE | 4x, 6x A7, uncapped | 640 | 930 | link |
+
+- One connection levels off at ~640 Mbit/s even uncapped. That is TCP window against this lab's 10 ms RTT, not CPU.
+- On the 100 Mbit port, the A7 runs at roughly 100/330, about 30 % busy.
+- These numbers lean pessimistic: VM exits (each interrupt, each wake from idle) are charged to the capped vCPU, and a real board's interrupts are cheaper than VM exits.
+- The published cross-check agrees: the NanoPi R1S-H3 (H3, A7 cores, USB gigabit) is quoted at 320-334 Mbit/s on its LAN port.
+
+Latency through the relay, 10 ms WAN RTT, A7 budget:
+
+| | Direct | Relay, uncapped | Relay, A7 budget |
+|---|---|---|---|
+| 1-byte round trip, idle, p50 | 10.04 ms | 10.19 ms | 10.16-10.19 ms |
+| New connection plus one round trip, idle, p50 | 20.12 ms | 20.47 ms | 20.47 ms |
+| Round trip under a saturating download, 100 Mbit, p50/p99 | n/a | 58 / 76 ms | 58 / 70 ms |
+| Round trip under a saturating download, 1 GbE, p50/p99 | n/a | 50 / 51 ms | 50 / 79 ms |
+
+- The slow CPU adds nothing at idle.
+- Under load, the queue in the shaped link dominates: bufferbloat, the same with any CPU.
+- The A7 budget shows only where it is saturated (1 GbE, p99 +28 ms).
+- Part of that tail is the emulation's own fault: a 1 ms/13 ms cap stalls up to 12 ms at a time, and a slow CPU does not.
+
+### What it costs
+
+| Measure | Value | Notes |
+|---|---|---|
+| Relay process RSS | 5-10 MB idle, +~10 KB per connection, 25 MB peak at 1000 connections | Go runtime plus 3 goroutines per connection |
+| Kernel memory | ~53 KB per open connection (drop in guest MemAvailable, 1 to 256 connections at 183 Mbit/s total) | socket buffers; grows with per-connection rate |
+| Threads | 6-12, independent of connection count | Go runtime |
+| File descriptors | ~3.4 per connection steady, up to 6 while both directions splice | 2 sockets plus Go's splice pipes |
+| Guest RAM | 201 MB MemTotal, ~145 MB available idle, ~105 MB just after 1000 connections | 256 MB guest with an 11 MB initramfs held in RAM |
+| CPU, link-paced, process only | ~6.5 ns/B at 200 Mbit/s, ~2 ns/B at 1 Gbit/s (Zen 3) | per-wakeup cost; a paced link delivers one MSS per wakeup |
+| CPU, whole guest, unpaced | 1.1-1.4 ns/B, about 5-6 cycles per relayed byte (Zen 3) | batched; the floor, not the typical case |
+| Binary, ARMv7 (`GOARM=7`, static) | 6.5 MB, 4.4 MB stripped | the install already strips (`-s -w`) |
+
+- **Cost is per packet, not per byte.** The same relay costs ~6.5 ns/B paced at 200 Mbit/s and ~0.4 ns/B unpaced, because a paced link wakes it once per packet.
+- **Cycles per byte has no single honest number.** Native on archserver, the core's figure includes the emulated router's forwarding and the shaper's timers (veth runs the receiver's work on the sender's CPU), and the process figure leaves out the kernel. The VM figures above are the isolated ones.
+
+### What changed because of this
+
+- **Kept: `splice` (`io.Copy` between TCP sockets).** It was measured head-to-head against read/write with 16, 32 and 128 KiB buffers: same throughput, process CPU within run-to-run noise (±10 %). Splice also avoids a memcpy, and memcpy is relatively the A7's weakest point (~27x slower than Zen 3, against ~16x for integer work). After a burst, Go's pipe pool keeps the idle splice pipes until garbage collection empties it (measured: 812 pipe descriptors still open 9 s after 300 connections ended, with every socket closed). New connections reuse them first, so the count is bounded by peak concurrency. It is retention, not a leak.
+- **Fixed: running out of file descriptors.**
+  - Under a busybox init the hard RLIMIT_NOFILE is the kernel default 4096. At 6 descriptors per connection that runs out near 680 connections, while the relay allowed 2048.
+  - In the VM, 1000 connections produced `accept4: too many open files` and EMFILE upstream dials, and throughput fell to 58 Mbit/s.
+  - Now the relay raises its own limit to what 2048 connections need (12352). Where it cannot, it sizes its connection cap to the descriptors it has. Example: a non-root relay at 1024 files caps at 160 connections, and the other 240 of 400 got "relay overloaded", which the client sends direct, with 0 EMFILE.
+  - After the fix, 1000 connections through the A7-budget VM: 0 errors.
+
+### Hardware that would not be the bottleneck at 1 GbE
+
+**One core of about 3x an A7 at 1.2 GHz** (CoreMark ~7,300) saturates 1 GbE with several connections. Candidates, not tested:
+
+| Board | SoC | Price (published) | Why it should do | Confidence |
+|---|---|---|---|---|
+| Orange Pi Zero 3 | H618, 4x A53 1.5 GHz, GbE | $15-25 | PassMark single-thread 396 vs 179 for an A7 at 1.2 GHz: ~2.2x per core, 4 cores | estimate; one core alone falls short of 3x, so it needs the kernel stack spread across cores (several flows, RPS) |
+| NanoPi R2S | RK3328, 4x A53 1.3 GHz, GbE | ~$30 | 940 Mbit/s NAT routing reported (OpenWrt forum) | NAT forwarding is cheaper than terminating TCP twice |
+| NanoPi R3S | RK3566, 4x A55, 2x GbE | $30-35 | 934 Mbit/s vendor iperf | vendor number |
+
+- Any single-core A7 board (Pico Max, Pico Mini, RV1103/1106) is CPU-bound near 330 Mbit/s at 1 GbE, which is moot on their 100 Mbit ports.
+- Archserver as the relay is far from its limit: 1.9 Gbit/s unpaced through the native relay (16 connections, offloads off) used 73 % of its core.
+
+### Running it on a Luckfox (not built)
+
+The stock image is Buildroot with busybox init and no systemd. What a port would need:
+
+| Need | Note |
+|---|---|
+| Binary | `GOARCH=arm GOARM=7 CGO_ENABLED=0`; static, 4.4 MB |
+| Init script | `/etc/init.d/S50tandem` starting `tandem run` with `TANDEM_CONFIG`, restart on exit (a `while` loop or busybox `start-stop-daemon`). No sd_notify or watchdog: both are already no-ops without `NOTIFY_SOCKET`. |
+| File limit | Handled by the fix above (the relay raises it as root); `ulimit -n 12352` in the script is belt and braces. |
+| ownbox | ownbox's lifecycle assumes git, a shell and systemd on the target. Realistic shape: archserver cross-builds and pushes the binary and init script over ssh, so the manifest's `install.setup` and `install.update` run on the build host, not on the board. Not designed yet. |
+| RAM reservation | The stock RV1106 image reserves memory for the camera pipeline (~66 MB by the Luckfox FAQ for other Pico models), which is free to reclaim for a relay. |
 
 ## Why Go
 
@@ -218,7 +327,8 @@ The one dependency patch: `google/nftables` v0.3.0 sends table flags as a hardco
 - **Measurements are coarse.** The key is /24 + port, so a CDN's different customers in one /24 share a verdict. Throughput samples include slow servers and slow readers. Hosts that are only ever touched with short connections are never measured and follow the global evidence.
 - **VPN detection is heuristic.** It looks at the default route's device type and xfrm policies. A split-tunnel VPN that leaves the default route alone does not pause tandem, but its traffic leaves through its own interface, and the redirect only matches the physical uplink, so that traffic is untouched.
 - **Clock skew over 120 s** between the machines makes the relay reject the client. Both run NTP.
-- **Relay overload:** at most 2048 concurrent upstream connections; beyond that the client goes direct.
+- **Relay overload:** at most 2048 concurrent upstream connections, fewer if the relay cannot get 6 file descriptors per connection (it logs the number at start). Beyond the cap the client goes direct.
+- **Small-hardware numbers are emulated.** No Luckfox or other ARM board was tested; see [Small hardware](#small-hardware) for how and how far to trust it.
 
 ## Status
 

@@ -9,7 +9,8 @@ What tandem is, how it works and its limitations are in README.md. This file cov
 | Repo | https://github.com/BogdanStamenovic/tandem (public), `main` |
 | archserver relay | Installed via `ownbox install tandem` (interactive), updated via `ownbox update` to d1f0535 (later commits change only docs, so it was not restarted for them). `tandem-relay.service` is enabled at boot. It listens on `192.168.1.139:7411` only and allows `192.168.1.0/24`. The key was rotated after the lab tests (the lab key passed through a tmux pane). |
 | Laptop (`ssh arch`, hostname `bogdan`) | Installed 2026-11-18 ~10:28 UTC (his go-ahead at 10:27 UTC) with a fresh interactive `ownbox install tandem`. `tandem-client.service` is enabled and active. The nft ruleset before the install is saved on archserver at `~/tandem-laptop-ruleset-before.nft`. Note: ownbox lives in `~/.local/bin`, which is not on the PATH of a non-interactive `ssh arch` shell, so prefix `PATH=$HOME/.local/bin:$PATH`. |
-| Lab | Torn down. `ip_forward` back to 0, no lab nft table, no container, no mounts. `test/container-lab.sh up/down` recreates it. |
+| Lab | Torn down. `ip_forward` back to 0, no lab nft table, no container, no mounts. `test/container-lab.sh up/down` recreates it. The small-hardware lab (`test/smallhw.sh`) is torn down too: no netns, no VM unit, no cgroups, `kvm.halt_poll_ns` back to 200000, cpu5 frequency limits back to 1750500-4470508 kHz. |
+| Relay fd-limit fix | In the repo (README "Small hardware"), not deployed to archserver: under systemd the unit's open-file limit is already ample, so it changes only the startup log line there. The next `ownbox update tandem` picks it up. |
 
 ## Tested, with numbers
 
@@ -79,9 +80,26 @@ Fail-open under systemd:
 | `ownbox update tandem --yes` (10:39 UTC, d1f0535 to d92c6d1) | Key and config hashes identical, learned stats kept (relay 143 Mbit/s n=28, direct 101 n=27 before and after), service restarted on the new binary, still enabled, laptop online. |
 | `test/bench.sh 3` | README, "Measured on the real laptop". Hetzner fsn1 +63 %, OVH -23 %, mirror +20 %, pacman +12 % (medians). |
 
+## Small hardware (2026-11-18 afternoon)
+
+Asked: could the relay run with the compute of a Luckfox Pico Max (he first said Mini, corrected to Max)? The full write-up is in README "Small hardware". In short:
+
+- An A7-class single core is fine behind its own 100 Mbit port, and tops out near 330 Mbit/s behind 1 GbE.
+- 1 GbE needs about 3x that CPU.
+- The data path already uses splice; read/write was no better.
+- One real fix: the relay now fits its connection cap to RLIMIT_NOFILE (EMFILE at 1000 connections under a bare init).
+
+Method notes for whoever reruns it:
+- A cgroup quota on the relay process is not an emulation: 90 % of the cost is kernel softirq it does not throttle. Use the VM mode.
+- amd-pstate-epp in active mode ignores per-core `scaling_max_freq`, so downclocking a core does not work here.
+- cpu.max takes at least 1 ms of quota, hence "1 ms per N ms" with N calibrated by CoreMark (13000 = A7 at 1.2 GHz).
+- CoreMark's iteration count is its 4th argument. Under a cap, auto-sizing (0) gives nonsense.
+- After switching the relay address between the VM and the native relay, flush the router namespace's neighbours, or the old MAC blackholes it.
+
 ## Not done
 
 - **Longer real-world numbers.** Three rounds on Wi-Fi only show differences over ~20 %. A run at a worse time of day (the prototype's 39 Mbit/s case) would say more.
+- **A real ARM board.** All small-hardware numbers are emulated; a Pico Max (or an H618 board for the 1 GbE case) on the bench would replace them. Packaging for a busybox target (init script, cross-build-and-push in place of ownbox on the board) is described in README, not built.
 - **`ownbox uninstall` on the laptop.** Exercised in the container only; he keeps tandem installed, so it was deliberately not run there.
 
 Bugs found and fixed on the way, so nobody "simplifies" them back:
