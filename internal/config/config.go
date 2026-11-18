@@ -67,13 +67,19 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	c.fill(filepath.Dir(path))
+	c.Fill(filepath.Dir(path))
 	return &c, c.Validate()
 }
 
-func (c *Config) fill(dir string) {
-	if c.LocalPort == 0 {
-		c.LocalPort = DefaultLocalPort
+// Fill sets defaults for unset fields; dir is the config directory.
+func (c *Config) Fill(dir string) {
+	if c.Role == RoleClient {
+		if c.LocalPort == 0 {
+			c.LocalPort = DefaultLocalPort
+		}
+		if c.Default == "" {
+			c.Default = "relay"
+		}
 	}
 	if c.PSKFile == "" {
 		c.PSKFile = filepath.Join(dir, "psk")
@@ -83,9 +89,6 @@ func (c *Config) fill(dir string) {
 	}
 	if c.RunDir == "" {
 		c.RunDir = DefaultRunDir
-	}
-	if c.Default == "" {
-		c.Default = "relay"
 	}
 }
 

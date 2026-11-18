@@ -160,6 +160,10 @@ func Install(o Options) error {
 			pingErr = errors.New("no key")
 		}
 	}
+	if cfg.Role == config.RoleRelay {
+		cfg.LocalPort, cfg.Default = 0, ""
+	}
+	cfg.Fill(filepath.Dir(cfgPath))
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -316,6 +320,9 @@ func askClient(a *Asker, o Options, cfg *config.Config, keyHex *string) error {
 	if defRelay == "" {
 		defRelay = cfg.Relay
 	}
+	if defRelay == "" {
+		defRelay = resolveRelay(relayHost())
+	}
 	if pairNow && o.Key == "" {
 		target := o.SSH
 		if target == "" {
@@ -373,6 +380,27 @@ func askClient(a *Asker, o Options, cfg *config.Config, keyHex *string) error {
 	}
 	cfg.Relay = r
 	return nil
+}
+
+// resolveRelay looks the relay host up and keeps only a private IPv4
+// answer: MagicDNS may also return the tailnet address, which is not a LAN
+// path and is never relayed through.
+func resolveRelay(host string) string {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return ""
+	}
+	for _, ip := range ips {
+		a, ok := netip.AddrFromSlice(ip)
+		if !ok {
+			continue
+		}
+		a = a.Unmap()
+		if a.Is4() && a.IsPrivate() {
+			return netip.AddrPortFrom(a, config.DefaultRelayPort).String()
+		}
+	}
+	return ""
 }
 
 // lanAddress returns the source address and connected prefix used to reach
