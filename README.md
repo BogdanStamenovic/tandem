@@ -362,7 +362,8 @@ The one dependency patch: `google/nftables` v0.3.0 sends table flags as a hardco
 
 ## Status
 
-- Relay role: installed through ownbox on archserver and running.
+- Relay role: installed through ownbox on archserver and running; discovery deployed 2026-11-18 (beacons verified on the wire with the real key).
+- Discovery on the real pair: after `ownbox update` at home, the laptop found the relay by query and beacons (`from query, last beacon 2s ago`, rtt 6.3 ms), and a 100 MB Hetzner download went through the relay at 76.6 Mbit/s.
 - Client role: installed on the laptop on 2026-11-18 with a fresh interactive `ownbox install tandem` (ssh pairing with archserver worked), running. Numbers are in [Measured on the real laptop](#measured-on-the-real-laptop).
 - Also exercised in network namespaces (27/27) and in a booted systemd-nspawn container on archserver, against the real relay, under the real unit file.
 
