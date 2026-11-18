@@ -4,6 +4,7 @@
 //	discotool sniff                                        # print the first beacon heard, hex
 //	discotool send   -from IP -to IP:PORT -hex HEX         # send exact bytes (replay)
 //	discotool verify -psk FILE -src IP -hex HEX            # check a captured beacon
+//	discotool query  -psk FILE -from IP -to BCAST:PORT     # signed query, wait for the answer
 package main
 
 import (
@@ -68,6 +69,38 @@ func main() {
 			log.Fatal(err)
 		}
 		send(*from, *to, p)
+	case "query":
+		k, err := pair.Load(*pskFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		key := discovery.Key(k)
+		lc := net.ListenConfig{Control: control}
+		pc, err := lc.ListenPacket(context.Background(), "udp4", *from+":0")
+		if err != nil {
+			log.Fatal(err)
+		}
+		q := discovery.Query{Time: time.Now(), Nonce: discovery.NewNonce()}
+		dst, _ := net.ResolveUDPAddr("udp4", *to)
+		t0 := time.Now()
+		if _, err := pc.WriteTo(q.Marshal(key), dst); err != nil {
+			log.Fatal(err)
+		}
+		_ = pc.SetDeadline(time.Now().Add(3 * time.Second))
+		buf := make([]byte, 512)
+		for {
+			n, src, err := pc.ReadFrom(buf)
+			if err != nil {
+				fmt.Println("no answer:", err)
+				os.Exit(1)
+			}
+			b, err := discovery.ParseBeacon(buf[:n], key, src.(*net.UDPAddr).AddrPort().Addr(), time.Now(), nil)
+			if err != nil || b.Kind != discovery.KindAnswer || b.Echo != q.Nonce {
+				continue
+			}
+			fmt.Printf("answer from %s in %s: relay %s, id %x, nonce echoed\n", src, time.Since(t0).Round(time.Microsecond), b.Addr, b.ID)
+			return
+		}
 	case "verify":
 		p, err := hex.DecodeString(*hx)
 		if err != nil {
