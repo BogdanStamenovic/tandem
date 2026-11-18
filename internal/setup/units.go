@@ -20,7 +20,7 @@ Restart=always
 RestartSec=2
 # The daemon pings the watchdog only while its accept loop answers a real
 # connection; a hung daemon is killed, and its rules die with it.
-WatchdogSec=10
+WatchdogSec=3
 TimeoutStopSec=15
 StateDirectory=tandem
 RuntimeDirectory=tandem
