@@ -8,7 +8,7 @@ What tandem is, how it works and its limitations are in README.md. This file cov
 |---|---|
 | Repo | https://github.com/BogdanStamenovic/tandem (public), `main` |
 | archserver relay | Installed via `ownbox install tandem` (interactive), updated via `ownbox update` to the latest commit. `tandem-relay.service` is enabled at boot. It listens on `192.168.1.139:7411` only and allows `192.168.1.0/24`. The key was rotated after the lab tests (the lab key passed through a tmux pane). |
-| Laptop (`ssh arch`, hostname `bogdan`) | **Nothing installed. Nothing changed.** Only read-only probes were run before it went down. |
+| Laptop (`ssh arch`, hostname `bogdan`) | Installed 2026-11-18 ~11:27 UTC (his go-ahead at 10:27 UTC) with a fresh interactive `ownbox install tandem`. `tandem-client.service` is enabled and active. The nft ruleset before the install is saved on archserver at `~/tandem-laptop-ruleset-before.nft`. Note: ownbox lives in `~/.local/bin`, which is not on the PATH of a non-interactive `ssh arch` shell, so prefix `PATH=$HOME/.local/bin:$PATH`. |
 | Lab | Torn down. `ip_forward` back to 0, no lab nft table, no container, no mounts. `test/container-lab.sh up/down` recreates it. |
 
 ## Tested, with numbers
@@ -68,10 +68,20 @@ Fail-open under systemd:
 | Fastly mirror, `extra.files.tar.gz` | 274-279 |
 | `pacman -Sw python go` | 217-243 |
 
+## On the laptop (2026-11-18)
+
+| Check | Result |
+|---|---|
+| Interactive install | Role defaulted to client; ssh pairing with archserver worked (over the tailnet, got the LAN address back); authenticated ping 9.5 ms; enabled. |
+| `tandem why` | Hetzner relayed; tailnet 100.72.2.62, LAN 192.168.1.139 and Moonlight port 47989 direct. `tailscale status` unchanged (archserver "active; direct"). |
+| SIGKILL during a request loop | Table gone within 200 ms; 16/16 requests 200 with no gap; restarted with the table back in under 4 s. |
+| Relay stopped on archserver for 6 s | 20/20 requests 200 at baseline latency (0.27-0.42 s); 1 fell back to direct; relay back up 5 s after restart. |
+| `test/bench.sh 3` | README, "Measured on the real laptop". Hetzner fsn1 +63 %, OVH -23 %, mirror +20 %, pacman +12 % (medians). |
+
 ## Not done
 
-- **Real laptop numbers** (README headline): direct vs relayed with `test/bench.sh`. This is the first thing to do.
-- **Laptop to archserver ssh pairing.** Never tested; the laptop went down before it could be probed. The paste path works.
+- **Longer real-world numbers.** Three rounds on Wi-Fi only show differences over ~20 %. A run at a worse time of day (the prototype's 39 Mbit/s case) would say more.
+- **`ownbox update` and `ownbox uninstall` on the laptop itself.** Exercised in the container, not on the laptop.
 
 Bugs found and fixed on the way, so nobody "simplifies" them back:
 

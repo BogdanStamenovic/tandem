@@ -19,7 +19,25 @@ For reference, archserver directly reached Cloudflare at ~400-500 and the mirror
 
 `test/bench.sh` on archserver itself, 2026-11-18 ~03:00 UTC, as the ceiling the relay can offer (Mbit/s): Hetzner fsn1 187-212, OVH 361-374, Hetzner Ashburn 54-57, `extra.files.tar.gz` from the Fastly mirror 274-279, `pacman -Sw python go` 217-243.
 
-Numbers from tandem itself on the real laptop: **not measured yet** (see [Status](#status)). `test/bench.sh` runs the same set with tandem pinned to direct and to relay, alternating.
+## Measured on the real laptop
+
+`test/bench.sh 3` on the laptop with tandem installed, 2026-11-18 11:30-11:36 UTC. Wi-Fi was at -64 dBm, 720 Mbit/s PHY rate. Each round pins every new connection to direct and then to relay (`tandem force`), in alternating order. Mbit/s for one 100 MB (or ~50 MB mirror file) download per cell; pacman is the total bytes of `pacman -Sw linux go python` over wall time, with pacman's parallel downloads.
+
+| Target | Direct (3 rounds) | Relay (3 rounds) | Median direct to relay |
+|---|---|---|---|
+| Hetzner fsn1 (DE) | 50 / 51 / 51 | 83 / 132 / 59 | 51 to 83 (+63 %) |
+| OVH (FR) | 145 / 178 / 180 | 137 / 137 / 212 | 178 to 137 (-23 %) |
+| Hetzner Ashburn (US) | 36 / 47 / 37 | 45 / 55 / 44 | 37 to 45 (+22 %) |
+| Fastly mirror, `extra.files.tar.gz` | 159 / 188 / 59 | 139 / 191 / 201 | 159 to 191 (+20 %) |
+| `pacman -Sw linux go python` | 135 / 166 / 156 | 178 / 37 / 175 | 156 to 175 (+12 %) |
+
+What that says, honestly:
+
+- The laptop's Wi-Fi was in much better shape than during the prototype (direct Hetzner 50 now against 39-67 then, mirror ~160-190 against 180-197), so there was less loss for split TCP to hide. The big prototype gap (39 to 189) did not reappear today.
+- The clear win is the one destination where the direct path was worst: Hetzner fsn1, relayed better in all 3 rounds. Ashburn was better in all 3 too, but by less; it is capped by archserver's own 54-57.
+- OVH was faster direct in 2 of 3 rounds. That is exactly the case the per-destination engine exists for. After the bench it had learned relay 164 against direct 167 for OVH's /24, a tie, so the default (relay) stays; the margin rule needs a 10 % difference to switch.
+- Two single cells are outliers (relay pacman 37, direct mirror 59). Three rounds on Wi-Fi are not enough to call differences under ~20 %.
+- What the engine had learned overall after the run: relay 104 Mbit/s (n=22), direct 85 Mbit/s (n=21).
 
 ## How it works
 
@@ -195,8 +213,8 @@ The one dependency patch: `google/nftables` v0.3.0 sends table flags as a hardco
 ## Status
 
 - Relay role: installed through ownbox on archserver and running.
-- Client role: exercised in network namespaces (25/25) and in a booted systemd-nspawn container on archserver, against the real relay, under the real unit file.
-- Not yet installed on the laptop; real before/after numbers there (including a `yay -Syu`-sized download) are the next step.
+- Client role: installed on the laptop on 2026-11-18 with a fresh interactive `ownbox install tandem` (ssh pairing with archserver worked), running. Numbers are in [Measured on the real laptop](#measured-on-the-real-laptop).
+- Also exercised in network namespaces (27/27) and in a booted systemd-nspawn container on archserver, against the real relay, under the real unit file.
 
 ## License
 
