@@ -72,11 +72,36 @@ laptop app ──TCP──▶ [nft redirect] ──▶ tandem client (127.0.0.1:
 
 **Relay (archserver, unprivileged service).**
 
-- It listens on the LAN address only and accepts a source only if it is in the allow list *and* proves the pre-shared key (HMAC-SHA256 over a timestamp, a nonce and the destination, with replay protection).
+- It listens on `0.0.0.0:7411`, so a new DHCP address changes nothing. It accepts a source only if it is in the allow list *and* proves the pre-shared key (HMAC-SHA256 over a timestamp, a nonce and the destination, with replay protection).
 - The reply is authenticated too, so a LAN impostor cannot pose as the relay.
 - It refuses private, loopback and tailnet destinations, so it cannot be used to reach archserver's own services or its LAN.
 - It is not an open proxy.
 - It does not encrypt: the payload is whatever the application sent, usually TLS already.
+
+**Discovery** (`internal/discovery`, `internal/client/discover.go`): the client is not told where the relay is; it finds it.
+
+- **Beacons.** Every 5 s the relay sends a signed beacon (UDP 7411) to the directed broadcast of each of its addresses that lies inside its allow list. The beacon carries the relay's own address, a timestamp and a nonce, and an HMAC under a key derived from the pairing key (never the key itself). The client uses the beacon's source address, and only if it equals the signed address.
+- **Queries.** When the client starts, when the network changes, and when a probe of the current relay fails, it broadcasts a signed query. The relay answers by unicast with the same signed format, echoing the query's nonce. A move of the relay to a new address is noticed within one round trip of the first failed probe, without waiting for the next beacon.
+- **Rejected:** a wrong key (`bad_mac`), a timestamp outside ±120 s (`stale`), a nonce already seen (`replay`), a packet whose source differs from the signed address (`source_mismatch`, which makes a captured beacon useless from any other host), an answer to a query this client never sent, a non-private or off-subnet address. `tandem status` counts each.
+- **Known networks.** A network is identified by its default gateway's MAC address plus the client's subnet. When the relay answers an authenticated handshake on a network (or `tandem pair`, `setup` or `upgrade` gets an answer from the static address there), that network is recorded as home in `/var/lib/tandem/discovery.json`, with the address that worked.
+- **Fallbacks, only on a known home network**, for when broadcast is filtered (Wi-Fi client isolation): first the last address that worked there (`cached`), then `relay` from the config (`static`). Two failed probes of one move to the other.
+- **Anywhere else, nothing to any relay address.** On a network that is not a known home and where no valid beacon is heard, the client has no relay address: no probe, no ARP, no handshake goes to the old relay IP or anyone else. What it does send there is the signed query, to the subnet broadcast address, when it joins the network and on changes (60 bytes; it reveals that a tandem client is present, not the key). The redirect stays paused.
+- **Network changes are acted on at once.** A netlink subscription (link, IPv4 address, IPv4 route) suspends probes and relay dials the moment anything changes, until the network is identified again. Only an unchanged network gets its relay back.
+- `tandem status` shows the address, where it came from (`beacon`, `query`, `cached`, `static`) and the counters. `"discovery": false` in the client config restores the old behaviour: the static address, used everywhere.
+
+Measured in `test/netns.sh` (client on a 3 ms, 1 %-loss "Wi-Fi" leg; the last two clean runs, 47/47 each):
+
+| Event | Result |
+|---|---|
+| Client starts with no relay address configured | rules up after 1.07 s (query answered); one earlier run lost the query and took 3.4 s, until the next beacon |
+| Relay's address changes (.2 to .20) | relaying again via the new address in 2.0-2.4 s (query after the first failed probe; 5.4 s when it waited for a beacon) |
+| Beacon signed with another key | rejected (`bad_mac`), relay unchanged |
+| Captured beacon replayed from another host / from the relay's address | `source_mismatch` / `replay` |
+| Broadcast filtered, known home | up via `cached` in 1.1 s |
+| Fresh state, broadcast filtered, no static address | stays paused; `tandem pair` records the network once the relay answers, then up via `cached` in 1.1 s |
+| Cached address dead | `static` in 3.1-3.2 s |
+| Moved to a foreign network whose hosts hold .1, .2 and .20 | relay address dropped 52-54 ms after the move; **0 packets** (IP or ARP) to the relay addresses or TCP 7411 in 15 s, counted by nft in the foreign namespace |
+| Back home | relaying again in 1.1 s |
 
 **The decision loop** (`internal/decide`, independent of sockets and nftables):
 
@@ -117,8 +142,8 @@ ownbox install tandem
 The setup is interactive on a terminal:
 
 1. **Role.** Relay or client; the default is guessed from the hostname (`TANDEM_RELAY_HOST`, default `archserver`).
-2. **Relay:** listen address (defaults to the LAN address), allowed client prefixes (defaults to the LAN subnet), keep or regenerate the key.
-3. **Client:** pair over ssh with the relay host. This runs `sudo -n tandem pair --export` there as the invoking user and fetches both the relay's address and the key. Alternatively paste the key (`sudo tandem pair --show` on the relay). Then the relay address, then an authenticated test ping.
+2. **Relay:** listen address (defaults to `0.0.0.0:7411`), allowed client prefixes (defaults to the LAN subnet; beacons go out on the addresses inside it), keep or regenerate the key.
+3. **Client:** pair over ssh with the relay host. This runs `sudo -n tandem pair --export` there as the invoking user and fetches both the relay's address and the key. Alternatively paste the key (`sudo tandem pair --show` on the relay). Then an optional static relay address (a fallback for when beacons are not heard, used only on networks where the relay has answered), then an authenticated test ping; if it answers, this network is recorded as home.
 4. **Start now and at boot?**
 
 Without a terminal (`ownbox install tandem --yes`) nothing prompts. The answers come from environment variables or defaults, and every value taken is printed:
@@ -137,6 +162,7 @@ Without a terminal (`ownbox install tandem --yes`) nothing prompts. The answers 
 Lifecycle:
 
 - `ownbox update tandem` rebuilds from vendored sources, replaces the binary and unit, and restarts the service if it was running. Config, key and learned data are kept.
+- **Updating a pre-discovery install** (tested in the container lab, `test/migrate-ct.sh`, 22 checks): the relay's `listen` changes from its one IP to `0.0.0.0` on the same port, and the original config is kept as `tandem.json.pre-discovery`. The client config is untouched: its `relay` becomes the static fallback. If that address answers an authenticated ping during the update, the current network is recorded as home. `ownbox rollback` to a pre-discovery revision works on the migrated config (an older binary accepts `0.0.0.0:7411` and ignores `discovery.json`), and so does updating forward again.
 - An older version started on newer learned data leaves the file untouched rather than downgrading it, so `ownbox rollback` is safe.
 - `ownbox uninstall tandem` stops and removes the units, the binary and any rules, and asks before deleting `/etc/tandem` and `/var/lib/tandem`.
 
@@ -315,8 +341,9 @@ The one dependency patch: `google/nftables` v0.3.0 sends table flags as a hardco
 - **IPv4 TCP only.** IPv6 is never redirected (the laptop has no global IPv6 today). UDP is never touched, so QUIC/HTTP3 (much of Google, Cloudflare and YouTube in browsers) stays direct. A later option is to block outbound UDP 443 so browsers fall back to TCP; it is not built.
 - **Only the laptop's own traffic.** Docker containers and VMs on the laptop are forwarded traffic and are not redirected.
 - **No encryption on the LAN leg.** Plain HTTP (some pacman mirrors) crosses the home LAN in clear between the laptop and archserver. It would cross the internet in clear anyway.
-- **Only one relay.** No discovery and no pool.
-- **Home network only.** Away from home the relay is unreachable and tandem stays paused. It does not relay over the tailnet.
+- **Only one relay.** No pool: two relays with the same key on one LAN would both be heard and the client would follow whichever spoke last.
+- **Home network only.** Away from home there is no relay and tandem stays paused, sending nothing. It does not relay over the tailnet.
+- **The relay must be on the client's subnet.** Broadcast does not cross a router, and the fallbacks are only used for an address inside the client's own subnet (an off-subnet address would send the probe to the gateway, i.e. out of the network). A routed relay needs `"discovery": false`.
 
 **Behaviour to know about**
 
@@ -326,7 +353,10 @@ The one dependency patch: `google/nftables` v0.3.0 sends table flags as a hardco
 - **Restarting the client cuts proxied connections** after an 8 s drain. This includes `ownbox update`.
 - **Measurements are coarse.** The key is /24 + port, so a CDN's different customers in one /24 share a verdict. Throughput samples include slow servers and slow readers. Hosts that are only ever touched with short connections are never measured and follow the global evidence.
 - **VPN detection is heuristic.** It looks at the default route's device type and xfrm policies. A split-tunnel VPN that leaves the default route alone does not pause tandem, but its traffic leaves through its own interface, and the redirect only matches the physical uplink, so that traffic is untouched.
-- **Clock skew over 120 s** between the machines makes the relay reject the client. Both run NTP.
+- **Clock skew over 120 s** between the machines makes the relay reject the client and the client reject the beacons. Both run NTP.
+- **A replaced router is a new network.** The fingerprint is the gateway's MAC, so after a router swap the cached and static fallbacks are not used until a beacon or answered query re-verifies the relay there. Beacons themselves keep working. Several access points behind one router share a gateway and so a fingerprint.
+- **Broadcast filtered on a network never verified as home** (a fresh install behind client isolation, with no static address answering at setup): the client stays paused. `sudo tandem pair --key KEY` with a static address records the network once the relay answers.
+- **Beacon traffic:** one 91-byte broadcast per relay address every 5 s; a query is 60 bytes, three at most per event.
 - **Relay overload:** at most 2048 concurrent upstream connections, fewer if the relay cannot get 6 file descriptors per connection (it logs the number at start). Beyond the cap the client goes direct.
 - **Small-hardware numbers are emulated.** No Luckfox or other ARM board was tested; see [Small hardware](#small-hardware) for how and how far to trust it.
 
