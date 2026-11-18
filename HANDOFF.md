@@ -7,7 +7,7 @@ What tandem is, how it works and its limitations are in README.md. This file cov
 | Piece | State |
 |---|---|
 | Repo | https://github.com/BogdanStamenovic/tandem (public), `main` |
-| archserver relay | Installed via `ownbox install tandem` (interactive), updated via `ownbox update` to the latest commit. `tandem-relay.service` is enabled at boot. It listens on `192.168.1.139:7411` only and allows `192.168.1.0/24`. The key was rotated after the lab tests (the lab key passed through a tmux pane). |
+| archserver relay | Installed via `ownbox install tandem` (interactive), updated via `ownbox update` to d1f0535 (later commits change only docs, so it was not restarted for them). `tandem-relay.service` is enabled at boot. It listens on `192.168.1.139:7411` only and allows `192.168.1.0/24`. The key was rotated after the lab tests (the lab key passed through a tmux pane). |
 | Laptop (`ssh arch`, hostname `bogdan`) | Installed 2026-11-18 ~10:28 UTC (his go-ahead at 10:27 UTC) with a fresh interactive `ownbox install tandem`. `tandem-client.service` is enabled and active. The nft ruleset before the install is saved on archserver at `~/tandem-laptop-ruleset-before.nft`. Note: ownbox lives in `~/.local/bin`, which is not on the PATH of a non-interactive `ssh arch` shell, so prefix `PATH=$HOME/.local/bin:$PATH`. |
 | Lab | Torn down. `ip_forward` back to 0, no lab nft table, no container, no mounts. `test/container-lab.sh up/down` recreates it. |
 
