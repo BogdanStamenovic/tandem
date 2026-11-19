@@ -16,6 +16,7 @@ What tandem is, how it works and its limitations are in README.md. This file cov
 - No audit table was ever created (the attempt was cut off), so there is nothing to remove. The wake task `tandem-laptop-back` is cancelled and its script deleted.
 - Installed 2026-11-18 ~10:28 UTC with an interactive `ownbox install tandem`; the nft ruleset before install is at `~/tandem-laptop-ruleset-before.nft` on archserver.
 - ownbox is in `~/.local/bin`, which is not on a non-interactive ssh PATH. |
+| Pending on both hosts | 12ef0e4 (query backoff while the relay is down) is pushed, not deployed. It changes only the client, and the laptop had relayed connections open at 01:15 local, so it was not restarted for this. The next `ownbox update tandem` there picks it up. archserver's relay is unaffected. |
 | Lab | Torn down. `ip_forward` back to 0, no lab nft table, no container, no mounts. `test/container-lab.sh up/down` recreates it. The small-hardware lab (`test/smallhw.sh`) is torn down too: no netns, no VM unit, no cgroups, `kvm.halt_poll_ns` back to 200000, cpu5 frequency limits back to 1750500-4470508 kHz. |
 | Relay fd-limit fix | In the repo (README "Small hardware"), not deployed to archserver: under systemd the unit's open-file limit is already ample, so it changes only the startup log line there. The next `ownbox update tandem` picks it up. |
 
@@ -105,6 +106,24 @@ Notes for whoever continues:
 - **`machinectl copy-to` will not overwrite.** `migrate-ct.sh` deletes the old bundle first; without that it silently tested a stale commit.
 - **tcpdump is not installed.** Captures use nft counters (netns) or an AF_PACKET socket bound to ETH_P_ALL. ETH_P_IP does not see outgoing frames.
 - **To prove "probes nothing" on the real laptop away from home:** add a count-only nft table (output hook, policy accept) counting `ip daddr 192.168.1.139` and TCP 7411, watch it for a minute, then delete it.
+
+## Real-use check (2026-11-19, 00:05-00:20 local)
+
+Asked: "soo the relay was slower? What about now." Logs are in `~/tandem-logs-2026-11-19/` on archserver.
+
+Bench, 2 rounds (direct / relay, Mbit/s):
+
+| Target | Direct | Relay |
+|---|---|---|
+| Hetzner fsn1 | 40, 42 | 128, 141 |
+| OVH | 59, 168 | 182, 188 |
+| Ashburn | 35, 39 | 42, 42 |
+| mirror | 119, 60 | 163, 180 |
+| pacman | 88, 76 | 183, 138 |
+| GitHub codeload (36.7 MB, 3 rounds) | 27, 25, 22 | 47, 65, 53 |
+
+- **Learned overall:** relay 74.5 (n=41) vs direct 67.1 (n=33).
+- **Archserver power:** it was powered off 21:59-22:43 and 22:56-00:44 local. tandem paused and resumed correctly. That outage exposed the query storm fixed in 12ef0e4.
 
 ## Small hardware (2026-11-18 afternoon)
 
