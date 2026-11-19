@@ -36,6 +36,9 @@ const (
 	// the link comes up). Three beacon intervals.
 	beaconTrust = 3 * discovery.Interval
 	queryWait   = 10 * time.Second
+
+	queryMinEvery = 2 * time.Second
+	queryMaxEvery = 60 * time.Second
 )
 
 // home is a network on which a relay with our key has proven itself.
@@ -72,6 +75,7 @@ type Finder struct {
 	pc        net.PacketConn
 	stats     DiscoveryCounters
 	lastQuery time.Time
+	qEvery    time.Duration // QuerySoon's current spacing (backoff)
 	fails     int // consecutive failed probes of a cached/static address
 }
 
@@ -222,6 +226,7 @@ func (f *Finder) NetChanged(ns NetState) {
 	}
 	old := f.fp
 	f.fp, f.prefixes = fp, ns.Prefixes
+	f.resetBackoff()
 	var addr netip.AddrPort
 	src := "unknown network"
 	switch {
@@ -428,6 +433,7 @@ func (f *Finder) receive(p []byte, src netip.Addr) {
 	}
 	f.lastHeard = time.Now()
 	f.heardFP = f.fp
+	f.resetBackoff()
 	f.id = hex.EncodeToString(b.ID[:])
 	// Keep the label of the first way we learned an unchanged address, so a
 	// steady stream of beacons does not churn the status.
@@ -461,16 +467,29 @@ func (f *Finder) ProbeFailed() {
 
 // QuerySoon is Query at most once per 2 s, for callers that may fire often
 // (every failed probe or relay dial).
+//
+// Unanswered, the spacing doubles up to queryMaxEvery: with archserver
+// powered off for hours, a fixed 2 s spacing broadcast 13,952 queries
+// overnight (2026-11-18). Any valid beacon or answer, or a network change,
+// resets it, so the first query after a failure is still immediate.
 func (f *Finder) QuerySoon() {
 	f.mu.Lock()
-	if time.Since(f.lastQuery) < 2*time.Second {
+	if f.qEvery == 0 {
+		f.qEvery = queryMinEvery
+	}
+	if time.Since(f.lastQuery) < f.qEvery {
 		f.mu.Unlock()
 		return
+	}
+	if !f.lastQuery.IsZero() && f.lastHeard.Before(f.lastQuery) {
+		f.qEvery = min(2*f.qEvery, queryMaxEvery)
 	}
 	f.lastQuery = time.Now()
 	f.mu.Unlock()
 	f.Query()
 }
+
+func (f *Finder) resetBackoff() { f.qEvery = queryMinEvery } // callers hold f.mu
 
 // Query broadcasts a signed query on every uplink subnet. Two repeats cover
 // a single lost packet on Wi-Fi.

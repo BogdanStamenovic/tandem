@@ -175,7 +175,12 @@ dt=$(( $(ms)-t0 ))
 [ "$s" = 200 ] && ok "relay dead: connection went direct in $dt ms" || { bad "relay dead: http=$s after $dt ms"; tail -5 "$T/client.log"; }
 wait_rules 0 5 && ok "relay dead: redirect paused $(( $(ms)-t0 )) ms after the relay died" || bad "relay dead: rules stayed"
 for i in 1 2 3; do t1=$(ms); inc curl -s -o /dev/null --max-time 10 http://203.0.113.10/; echo "   request $i after relay death: $(( $(ms)-t1 )) ms"; done
-start_relay; wait_rules 1 10
+# queries back off while nobody answers (a fixed 2 s spacing sent ~30 in 60 s)
+q0=$(cli status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["discovery"]["counters"]["queries_sent"])')
+sleep 60
+q1=$(cli status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["discovery"]["counters"]["queries_sent"])')
+[ $((q1-q0)) -le 24 ] && ok "relay dead for 60 s: $((q1-q0)) query packets sent (backoff; 2 s fixed spacing would be ~90)" || bad "relay dead: $((q1-q0)) query packets in 60 s"
+start_relay; t0=$(ms); wait_rules 1 10 && echo "   relay back: rules in $(( $(ms)-t0 )) ms (beacon or backed-off query)"
 
 # ---- another VPN takes the default route
 inc ip tuntap add vpn0 mode tun; inc ip link set vpn0 up
